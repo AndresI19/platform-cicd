@@ -51,10 +51,28 @@ docker compose -f runner/compose.yml up -d --build
 docker compose -f runner/compose.yml logs -f
 ```
 
+## Start it at boot
+
+The runner is a systemd **user** unit, ordered after the platform (it joins minikube's docker
+network, which only exists once the cluster is up). Installing it is copying the file AND enabling
+linger — the same two-part step the platform units need, and the same one that is easy to half-do:
+
+```bash
+cp runner/runner.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now runner.service
+sudo loginctl enable-linger "$USER"   # WITHOUT THIS, no user unit starts at boot
+```
+
+A job waits in GitHub's queue until a runner takes it, so a runner that is not running at boot does
+not lose work — it just delays every deploy until someone starts it. Which is exactly the kind of
+quiet gap this unit closes. Verify: `systemctl --user is-enabled runner` and
+`loginctl show-user "$USER" -p Linger` must read `enabled` and `Linger=yes`.
+
 ## Layout
 
 ```
-runner/     Dockerfile · compose.yml · entrypoint.sh   — the runner, as a container
+runner/     Dockerfile · compose.yml · entrypoint.sh · runner.service   — the runner + its boot unit
 deploy/     build.sh · deploy.sh                       — what a release actually does
 .github/    release.yml                                — the serialized deploy queue
 ```

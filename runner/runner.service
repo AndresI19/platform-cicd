@@ -1,0 +1,39 @@
+# Brings the self-hosted runner up at boot.
+#
+# Why this exists: the runner is a docker compose service, and `docker compose up` is a thing someone
+# has to run. Without this unit, every reboot leaves the platform with no runner — and because a job
+# waits in GitHub's queue until a matching runner takes it, a deploy merged after a reboot would sit
+# there, silently, until someone logged in and started the runner by hand. That is the same failure
+# shape as platform.service before it existed: the machine came back, the thing that serves did not.
+#
+# A *user* unit, like colima.service and platform.service, because the docker socket, the compose
+# project, and runner/.env (the PAT + the deployer kubeconfig) all belong to this user. Under
+# `loginctl enable-linger` a user unit starts at boot with no login session — WITHOUT LINGER THIS
+# UNIT WILL NOT RUN AT BOOT, exactly like the other two.
+[Unit]
+Description=platform-cicd self-hosted runner
+# Requires= the docker daemon: with Colima's VM down there is no daemon for `docker compose` to talk
+# to. After= platform.service because the runner's compose file joins the `minikube` docker network as
+# an external network, and that network only exists once minikube has started — `docker compose up`
+# fails outright if it is absent. Wants=, not Requires=, on platform.service: if the platform is slow,
+# Restart=on-failure below simply retries until the network appears, rather than the runner failing
+# permanently because it lost a start-order race.
+After=colima.service platform.service network-online.target
+Requires=colima.service
+Wants=platform.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+# docker manages the container's own lifecycle from here (restart: always is what respawns the
+# ephemeral runner between jobs); systemd's job is only to bring the project up at boot and take it
+# down on stop.
+ExecStart=/home/linuxbrew/.linuxbrew/bin/docker compose -f %h/git-workspace/claude-workspace/platform-cicd/runner/compose.yml up -d
+ExecStop=/home/linuxbrew/.linuxbrew/bin/docker compose -f %h/git-workspace/claude-workspace/platform-cicd/runner/compose.yml down
+# Retry until platform.service has created the minikube network (a cold boot is ~5 minutes).
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=default.target
