@@ -24,10 +24,14 @@ say() { echo "    $*"; }
 # `kubectl set image` will happily accept a tag that does not exist: the Deployment is patched, the
 # Pod is scheduled, and it sits in ImagePullBackOff — a failure that surfaces two minutes later as a
 # rollout timeout rather than as "you deployed a typo". Ask the registry first.
+#
+# Check the TAGS LIST, not the manifest endpoint. Requesting a manifest pins an Accept media type, and
+# a registry answers 404 — not 406 — when the stored manifest is a different type than the one asked
+# for. Docker 28 pushes an OCI manifest; asking for the older docker schema2 type returns 404 and
+# reads as "image missing" when the image is right there. The tags list has no such ambiguity.
 echo "==> Verifying ${IMAGE} exists"
-curl -fsS --cacert /certs/ca.crt \
-  "https://registry:5000/v2/${COMPONENT}/manifests/${VERSION}" \
-  -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' -o /dev/null \
+curl -fsS --cacert /certs/ca.crt "https://registry:5000/v2/${COMPONENT}/tags/list" \
+  | grep -q "\"${VERSION}\"" \
   || { echo "FATAL: ${IMAGE} is not in the registry — nothing was deployed" >&2; exit 1; }
 say "present"
 
