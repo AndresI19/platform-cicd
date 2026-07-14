@@ -36,6 +36,16 @@ if [ -n "${KUBECONFIG_B64:-}" ]; then
   chmod 600 /home/runner/.kube/config
 fi
 
+# --- start from a clean slate --------------------------------------------------------------------
+# restart: always reuses the SAME container, so the previous ephemeral run's files are still here. A
+# half-applied runner SELF-UPDATE (see --disableupdate below) leaves bin/ missing Runner.Listener and
+# its .so files, and every subsequent start then crash-loops with "No such file or directory". Remove
+# the per-run state so each registration is pristine; bin/ and the runner package itself stay from the
+# image, which is the only place they should ever come from.
+rm -rf /home/runner/_work /home/runner/_diag \
+       /home/runner/.runner /home/runner/.credentials* /home/runner/.env 2>/dev/null || true
+chown -R runner:runner /home/runner
+
 # --- register ------------------------------------------------------------------------------------
 # A registration token lasts an hour and is spent on one registration. An ephemeral runner
 # de-registers after every job, so a fresh one is needed on every container start — which is why this
@@ -53,10 +63,15 @@ exec gosu runner bash -Eeuo pipefail -c '
     --name "${RUNNER_NAME:-platform-runner}" \
     --labels self-hosted,platform \
     --work /home/runner/_work \
-    --unattended --replace --ephemeral
+    --unattended --replace --ephemeral --disableupdate
 
+  # --disableupdate: the runner must NEVER self-update. A self-update rewrites bin/ in the persistent
+  # container layer, and a half-applied one leaves Runner.Listener and its .so files missing, so every
+  # restart after that crash-loops with "No such file or directory". The image is how the runner gets
+  # updated here — rebuild it. Nothing at runtime touches bin/.
+  #
   # --ephemeral: run.sh exits after ONE job, having de-registered. compose (restart: always) brings us
-  # back with a clean slate. The docker layer cache is untouched by that, because it lives in colima s
-  # daemon rather than in here.
+  # back, and the state wipe above makes that a clean slate. The docker layer cache is untouched by any
+  # of this, because it lives in colima s daemon rather than in here.
   exec ./run.sh
 '

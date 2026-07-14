@@ -6,7 +6,11 @@
 # the VM at all. That boundary is what makes a container acceptable without a dedicated unix account.
 FROM ubuntu:24.04
 
-ARG RUNNER_VERSION=2.328.0
+# Keep current. GitHub deprecates old runner versions SERVER-SIDE: a runner too far behind connects,
+# is told "deprecated and cannot receive messages", and exits — jobs then queue forever with no
+# runner able to accept them. Because we build with --disableupdate (the runner must never rewrite its
+# own bin/), staying current is this ARG's job. Bump it when GitHub starts rejecting the pinned one.
+ARG RUNNER_VERSION=2.335.1
 ENV DEBIAN_FRONTEND=noninteractive
 
 # curl/jq: fetch the registration token. git: check the app repo out. gosu: drop root after fixing the
