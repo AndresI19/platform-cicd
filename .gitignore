@@ -1,0 +1,2 @@
+# The runner's credentials. A PAT and a cluster token; neither has any business in git.
+runner/.env

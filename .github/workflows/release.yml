@@ -1,0 +1,74 @@
+# The platform's only deploy path.
+#
+# It is triggered by repository_dispatch, and that is not ceremony — it is forced, and it is also what
+# makes the whole thing safe:
+#
+#   * A self-hosted runner can only be scoped to ONE REPOSITORY. Org-level runners (and runner groups)
+#     are an organization feature, and AndresI19 is a personal account. So five app repos cannot share
+#     one runner — and a reusable workflow would not help, because its jobs run in the CALLING repo's
+#     context and would need a runner registered there.
+#   * Therefore the runner lives here, and here only. No app repo can reach it at all — not by label,
+#     not by a crafted workflow, not from a fork. It does not exist in their world.
+#   * And because every component's deploy is a job in THIS repo, the concurrency group below actually
+#     works. Concurrency groups are per-repository: five copies of a workflow in five repos would be
+#     five different groups, serializing nothing.
+name: release
+
+on:
+  repository_dispatch:
+    types: [release]
+
+# ONE queue for the whole platform. `cancel-in-progress: false` is load-bearing: the default (true)
+# would cancel a queued quiz deploy the moment a vmcp deploy arrived — silently dropping a release.
+concurrency:
+  group: platform-deploy
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: [self-hosted, platform]
+    steps:
+      - name: The deploy scripts
+        uses: actions/checkout@v4
+
+      # The component's source, at the exact tag the app repo just cut. Checking out by TAG rather
+      # than by SHA is deliberate: the tag IS the version, and building anything else would ship an
+      # image whose /version lies about what is in it.
+      - name: ${{ github.event.client_payload.component }} @ ${{ github.event.client_payload.version }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ github.event.client_payload.version }}
+          path: src
+          submodules: recursive # the quiz vendors @platform/ui as a submodule; without it, npm ci fails
+
+      - name: Build and publish
+        run: |
+          ./deploy/build.sh \
+            "${{ github.event.client_payload.component }}" \
+            "${{ github.event.client_payload.version }}" \
+            src
+
+      - name: Deploy
+        run: |
+          ./deploy/deploy.sh \
+            "${{ github.event.client_payload.component }}" \
+            "${{ github.event.client_payload.version }}"
+
+      # GitHub's own failure signals are all PULL — a red ✗ you have to go and look at. This platform's
+      # recurring bug is the silent failure (units never installed, /version stuck on "snapshot",
+      # `minikube image load` no-oping while reporting success), so a failure gets PUSHED, to the same
+      # webhook platform-boot.sh already uses.
+      - name: Say it broke
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$WEBHOOK" ] || exit 0
+          curl -fsS -H 'Content-Type: application/json' -d "$(cat <<JSON
+          {"username":"platform-cicd","embeds":[{
+            "title":"❌ release FAILED — ${{ github.event.client_payload.component }} ${{ github.event.client_payload.version }}",
+            "description":"Nothing was deployed, or it was rolled back.\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>",
+            "color":15548997}]}
+          JSON
+          )" "$WEBHOOK"

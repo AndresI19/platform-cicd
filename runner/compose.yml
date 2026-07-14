@@ -1,0 +1,37 @@
+# The runner, as a guest on minikube's docker network.
+#
+# It is a GUEST: minikube created that network and owns the node container on it. Compose must not try
+# to define the node — `minikube start` builds it with a privileged/cgroup/tmpfs/port contract its
+# bootstrapper depends on, and a container compose made would not be recognised as minikube's own.
+# Declaring the network `external` is how we join without pretending to own it.
+#
+# Being on that network is what makes the runner useful: from here, and only from here, it can reach
+#   registry:5000        — the image registry, which has no inbound port
+#   192.168.49.2:8443    — the apiserver at its NATIVE address, unroutable from the host
+services:
+  runner:
+    build: .
+    image: platform-runner:latest
+    container_name: platform-runner
+    # --ephemeral means run.sh exits after one job. This is what brings it straight back — without it
+    # the runner would take exactly one job in its life and then silently stop consuming the queue,
+    # and the jobs would pile up until GitHub timed them out.
+    restart: always
+    env_file: [.env]
+    volumes:
+      # The docker daemon it builds with. This is root-equivalent on the VM, and it is the reason the
+      # colima mount was narrowed: a job here can `docker run -v` any path the VM can see, and the VM
+      # can now see exactly one directory containing three certificate files.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The registry's CA, so deploy.sh's curl can verify the registry before deploying a tag that
+      # might not be there. `docker push` does NOT need this — that runs in colima's daemon, which
+      # already trusts the CA (platform-orchestration's k8s/registry.sh installs it).
+      #
+      # This is the ONE host path the VM can see, so mounting it costs no new exposure: a job on this
+      # runner could reach it anyway. Read-only, and the CA PRIVATE key is deliberately not in there.
+      - ${PLATFORM_VM_DIR:-/home/ClaudeSpace/git-workspace/claude-workspace/.platform-vm}/certs:/certs:ro
+    networks: [minikube]
+
+networks:
+  minikube:
+    external: true
