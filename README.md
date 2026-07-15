@@ -1,78 +1,46 @@
 # platform-cicd
 
-The platform's only deploy path: a self-hosted GitHub Actions runner, the scripts it runs, and one
-serialized queue for every component.
+The platform's deploy path: a single self-hosted GitHub Actions runner and the scripts it runs. A
+merge to any app repo's `main` builds that component on this machine, pushes it to the local TLS
+registry, and rolls it out — reported to Discord, with no inbound port and a runner that cannot read
+the platform's secrets.
 
-```
-app repo (merge → main)          this repo                    this machine
-─────────────────────────        ──────────────────────       ─────────────────────────
-tag  ────────────────────►  repository_dispatch  ────────►    the ONLY self-hosted runner
-dispatch (GitHub's VMs)          concurrency: platform-deploy  build → push → deploy
-```
+## The pieces
 
-## Why the dispatch hop exists
+| Path | What it is |
+| --- | --- |
+| `.github/workflows/release.yml` | the deploy job — triggered by `repository_dispatch`, one per component |
+| `runner/Dockerfile` · `compose.yml` · `entrypoint.sh` | the self-hosted runner: ephemeral, buildx, on minikube's docker network |
+| `runner/runner.service` | systemd **user** unit that starts the runner at boot |
+| `deploy/build.sh` | build one component's image (a per-component registry of build contexts) and push it |
+| `deploy/deploy.sh` | `kubectl set image` the component, wait, verify, roll back on failure |
+| `scripts/kubeconfig.sh` | mint the least-privilege `deployer` kubeconfig for `runner/.env` |
 
-**A self-hosted runner can only be scoped to one repository.** Org-level runners and runner groups are
-an *organization* feature; `AndresI19` is a personal account. Five app repos therefore cannot share a
-runner — and a reusable workflow does not help, because its jobs run in the **calling** repo's context
-and would need a runner registered *there*.
+The matching half lives in each app repo as its own `release.yml`: on merge it reads the tag
+`version-tag.yml` cut and `repository_dispatch`es here. See [Deploy pipeline](docs/deploy-pipeline.md).
 
-So the runner lives here, and only here. Three things follow, and all of them are good:
-
-- **No app repo can reach it.** Not by label, not by a crafted workflow, not from a fork. The runner
-  does not exist in their world.
-- **The concurrency group actually works.** Every component's deploy is a job in *this* repo, so one
-  `concurrency: group: platform-deploy` serializes all five. (Groups are per-repository — five copies
-  of a workflow in five repos would be five groups, serializing nothing.)
-- **This repo is private**, so it has no fork PRs at all — which is the attack that makes self-hosted
-  runners on *public* repos dangerous.
-
-## Why the runner can do so little
-
-It builds images, so it holds the docker socket — root-equivalent on the colima VM. Everything else is
-fenced:
-
-- **It cannot read your home directory.** Colima mounts exactly one host directory (three certificate
-  files). `~/.ssh`, the Cloudflare tunnel token and the sealed-secrets master key do not exist inside
-  the VM, so no container — including one a job starts — can bind-mount them.
-- **It cannot read Kubernetes Secrets.** It authenticates as the `deployer` ServiceAccount, which may
-  patch Deployments and create the version-spec writer Pod. `kubectl auth can-i get secrets` → **no**.
-  It could not read the tunnel token, the Postgres passwords, or the auth signing key if it tried.
-
-That second one is a consequence of the first: the host's kubeconfig authenticates with client certs
-under `~/.minikube`, which the container cannot see — so rather than widen the mount, the runner got an
-identity of its own. The boundary made the design.
-
-## Run it
+## Run & connect
 
 ```bash
-cp runner/.env.example runner/.env    # then fill it in — see the file
+cp runner/.env.example runner/.env     # fill in GH_PAT and KUBECONFIG_B64 — see the file
 docker compose -f runner/compose.yml up -d --build
 docker compose -f runner/compose.yml logs -f
 ```
 
-## Start it at boot
-
-The runner is a systemd **user** unit, ordered after the platform (it joins minikube's docker
-network, which only exists once the cluster is up). Installing it is copying the file AND enabling
-linger — the same two-part step the platform units need, and the same one that is easy to half-do:
+Start it at boot (a systemd **user** unit — needs linger, the same two-part step the platform units
+need):
 
 ```bash
 cp runner/runner.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now runner.service
-sudo loginctl enable-linger "$USER"   # WITHOUT THIS, no user unit starts at boot
+sudo loginctl enable-linger "$USER"    # WITHOUT THIS, no user unit starts at boot
 ```
 
-A job waits in GitHub's queue until a runner takes it, so a runner that is not running at boot does
-not lose work — it just delays every deploy until someone starts it. Which is exactly the kind of
-quiet gap this unit closes. Verify: `systemctl --user is-enabled runner` and
-`loginctl show-user "$USER" -p Linger` must read `enabled` and `Linger=yes`.
+Verify: `systemctl --user is-enabled runner` → `enabled`, `loginctl show-user "$USER" -p Linger` →
+`Linger=yes`. A job waits in GitHub's queue until a runner takes it, so a runner that is down at boot
+delays deploys rather than losing them.
 
-## Layout
-
-```
-runner/     Dockerfile · compose.yml · entrypoint.sh · runner.service   — the runner + its boot unit
-deploy/     build.sh · deploy.sh                       — what a release actually does
-.github/    release.yml                                — the serialized deploy queue
-```
+**Full documentation** → the [docs](docs/): [Architecture](docs/architecture.md) ·
+[Runner](docs/runner.md) · [Deploy pipeline](docs/deploy-pipeline.md) · [Security](docs/security.md) ·
+[Operations](docs/operations.md) · [Troubleshooting](docs/troubleshooting.md).
