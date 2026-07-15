@@ -32,6 +32,17 @@ RUN curl -fsSLo /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/v1.32.0/bin/linux/amd64/kubectl" \
  && chmod +x /usr/local/bin/kubectl
 
+# helm — the deploy is `helm upgrade` now, not `kubectl set image`: the platform migrated off kustomize
+# and its image tags live in the Helm RELEASE (server-side state), so there is no committed file for a
+# later apply to revert. Pinned to the SAME major/version as the host that created the release (4.x):
+# Helm 4 defaults to server-side apply and needs --force-conflicts to take fields a prior `kubectl set
+# image` owned, and a Helm 3 client on a Helm 4 release would risk both the apply semantics and the
+# release format. It reaches the cluster with the very same kubeconfig kubectl uses above.
+ARG HELM_VERSION=4.2.3
+RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
+      | tar -xz -C /usr/local/bin --strip-components=1 linux-amd64/helm \
+ && chmod +x /usr/local/bin/helm
+
 # buildx — the BuildKit builder, installed as a docker CLI plugin. The static docker CLI above ships
 # NO build plugins, and modern `docker build` requires buildx: the legacy builder is gone, so a bare
 # build (or DOCKER_BUILDKIT=1) errors with "buildx component is missing". buildx is needed for its own

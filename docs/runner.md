@@ -52,14 +52,15 @@ Both live in `runner/.env` (gitignored). `scripts/kubeconfig.sh` mints the secon
   time). Not the dispatch token — see [Security](security.md#the-two-tokens).
 - **`KUBECONFIG_B64`** — the `deployer` ServiceAccount's kubeconfig, base64'd. Passed as an **env var,
   not a mount**, deliberately: the VM mounts exactly one host directory and adding a kubeconfig would
-  widen that window. The identity can patch Deployments and **cannot read Secrets** — see
+  widen that window. The identity deploys via `helm upgrade`; because Helm stores release state in a
+  Secret, it **can read Secrets** — a deliberate trade on this single-dev machine, see
   [Security → The deployer identity](security.md#the-deployer-identity).
 
 ## The docker socket
 
 `compose.yml` mounts `/var/run/docker.sock`. That is **root-equivalent on the colima VM** — it is how
 the runner builds images, and it is the reason the whole security model is about fencing *everything
-else*: the narrowed colima mount and the least-privilege deployer both exist because this socket
+else*: the narrowed colima mount and the scoped deployer both exist because this socket
 cannot be taken away. See [Security](security.md).
 
 The socket's group ID is a property of the VM, not the image, so the entrypoint reads it off the

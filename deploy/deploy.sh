@@ -1,34 +1,44 @@
 #!/usr/bin/env bash
-# deploy.sh <component> <version> — roll one component to one version.
+# deploy.sh <component> <version> — roll one component to one version, via Helm.
 #
-# Runs INSIDE the runner container, which changes everything about it compared to the host's deploy:
+# Runs INSIDE the runner container, as the `deployer` ServiceAccount. What changed with the platform's
+# move off kustomize:
 #
-#   * No kubeconfig repoint. The host has to re-derive the forwarded apiserver port on every boot,
-#     because docker lives in a colima VM and the node's address (192.168.49.2:8443) is unroutable
-#     from outside it. This container is ON that network, so the address minikube wrote is simply
-#     correct. The workaround three host scripts exist for does not apply here.
-#   * No `minikube` CLI, and no side-load. The kubelet PULLS from registry:5000 — so publishing an
-#     image is `docker push`, and deploying it is one `kubectl set image`.
-#   * No admin credentials. It authenticates as the `deployer` ServiceAccount, which may patch
-#     Deployments and create the version-spec writer Pod, and may NOT read Secrets.
+#   * The deploy is `helm upgrade`, not `kubectl set image`. Image tags live in the Helm RELEASE
+#     (server-side state), so there is nothing in a committed file for a later `apply` to revert — the
+#     old kustomize pins-vs-set-image conflict is gone. Every deploy is a versioned, rollback-able
+#     release revision, and the version-writer hook refreshes platform-version.json on EVERY one (the
+#     kubectl-set-image path never did, so /version silently drifted from what was running).
+#   * --atomic replaces the hand-rolled `rollout undo`: a failed upgrade rolls the release back to the
+#     previous revision on its own. Because each component is its own upgrade, that reverts only the
+#     failing component, not ones already deployed earlier in the same release batch.
+#   * --reuse-values keeps every OTHER component's last-deployed image, so a per-component deploy leaves
+#     the release complete and the version spec accurate.
+#   * --force-conflicts: a legacy `kubectl set image` leaves field-manager `kubectl-set` owning the
+#     image field, and Helm 4's server-side apply must be told to take it. The chart/release IS the
+#     source of truth, so forcing is correct — and it keeps CI authoritative over any manual hotfix.
+#
+# Still true: no kubeconfig repoint (this container is ON minikube's network, so the native apiserver
+# address minikube wrote is simply correct), and the image is PULLED from registry:5000 (no side-load).
 set -Eeuo pipefail
 
 COMPONENT="${1:?usage: deploy.sh <component> <version>}"
 VERSION="${2:?usage: deploy.sh <component> <version>}"
 NS=platform
+RELEASE=platform
+# The chart, checked out by release.yml from platform-orchestration@main into ./orchestration.
+# Overridable for a hand-run.
+CHART="${CHART:-orchestration/chart}"
 IMAGE="registry:5000/${COMPONENT}:${VERSION}"
 
 say() { echo "    $*"; }
 
 # --- 1. refuse to deploy an image that is not really there --------------------------------------
-# `kubectl set image` will happily accept a tag that does not exist: the Deployment is patched, the
-# Pod is scheduled, and it sits in ImagePullBackOff — a failure that surfaces two minutes later as a
-# rollout timeout rather than as "you deployed a typo". Ask the registry first.
-#
-# Check the TAGS LIST, not the manifest endpoint. Requesting a manifest pins an Accept media type, and
-# a registry answers 404 — not 406 — when the stored manifest is a different type than the one asked
-# for. Docker 28 pushes an OCI manifest; asking for the older docker schema2 type returns 404 and
-# reads as "image missing" when the image is right there. The tags list has no such ambiguity.
+# A bad tag would patch the Pod spec, sit in ImagePullBackOff, and surface as a --wait timeout two
+# minutes later rather than "you deployed a typo". Ask the registry first. Check the TAGS LIST, not the
+# manifest endpoint: a manifest request pins an Accept media type and a registry answers 404 (not 406)
+# for a type it does not have stored — docker 28 pushes OCI, so asking for schema2 reads a present image
+# as missing. The tags list has no such ambiguity.
 echo "==> Verifying ${IMAGE} exists"
 curl -fsS --cacert /certs/ca.crt "https://registry:5000/v2/${COMPONENT}/tags/list" \
   | grep -q "\"${VERSION}\"" \
@@ -36,31 +46,28 @@ curl -fsS --cacert /certs/ca.crt "https://registry:5000/v2/${COMPONENT}/tags/lis
 say "present"
 
 # --- 2. remember what we are replacing ----------------------------------------------------------
-# The fallback version, made explicit. `kubectl rollout undo` can do this itself, but recording it
-# means the failure message can NAME what it reverted to instead of saying "undone".
+# So the failure message can NAME what --atomic reverted to, rather than saying "rolled back".
 PREVIOUS="$(kubectl -n "$NS" get deploy "$COMPONENT" \
-  -o jsonpath='{.spec.template.spec.containers[0].image}')"
+  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
 say "currently running ${PREVIOUS}"
 
 # --- 3. the deploy ------------------------------------------------------------------------------
-echo "==> Rolling ${COMPONENT} → ${VERSION}"
-kubectl -n "$NS" set image "deploy/${COMPONENT}" "${COMPONENT}=${IMAGE}"
-
-# The rollout is where a bad image actually announces itself. A failure here is not an error to
-# report and walk away from — it is a site that is half-deployed, so it reverts.
-if ! kubectl -n "$NS" rollout status "deploy/${COMPONENT}" --timeout=300s; then
-  echo "!!! rollout failed — reverting to ${PREVIOUS}" >&2
-  kubectl -n "$NS" rollout undo "deploy/${COMPONENT}"
-  kubectl -n "$NS" rollout status "deploy/${COMPONENT}" --timeout=180s || true
-  echo "FATAL: ${COMPONENT} ${VERSION} failed to roll out; reverted to ${PREVIOUS}" >&2
+# --reuse-values keeps the other components' images; only this one's repo/tag/version change. The chart
+# app key IS the component name (home, quiz, vmcp, rs-mcp-server, platform-auth, fvt-traffic).
+echo "==> helm upgrade ${RELEASE}: ${COMPONENT} → ${VERSION}"
+if ! helm upgrade "$RELEASE" "$CHART" -n "$NS" --reuse-values \
+      --set "apps.${COMPONENT}.image.repo=registry:5000/${COMPONENT}" \
+      --set "apps.${COMPONENT}.image.tag=${VERSION}" \
+      --set "apps.${COMPONENT}.version=${VERSION}" \
+      --wait --atomic --force-conflicts --timeout 5m; then
+  echo "FATAL: ${COMPONENT} ${VERSION} failed to roll out; --atomic reverted to ${PREVIOUS}" >&2
   exit 1
 fi
 say "rolled out"
 
 # --- 4. what is actually running now ------------------------------------------------------------
-# Read it back rather than trusting the command that set it. Every silent failure this platform has
-# had — the units that were never installed, `minikube image load` no-oping, /version reporting
-# "snapshot" forever — was a step that reported success without being checked.
+# Read it back rather than trusting the command that set it — every silent failure this platform has
+# had was a step that reported success without being checked.
 LIVE="$(kubectl -n "$NS" get deploy "$COMPONENT" \
   -o jsonpath='{.spec.template.spec.containers[0].image}')"
 [ "$LIVE" = "$IMAGE" ] || { echo "FATAL: expected ${IMAGE}, cluster says ${LIVE}" >&2; exit 1; }
