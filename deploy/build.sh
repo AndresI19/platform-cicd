@@ -9,6 +9,15 @@
 #     certificate here. The curl in deploy.sh does, which is why /certs is mounted.
 set -Eeuo pipefail
 
+# Force BuildKit. The runner's docker CLI has no buildx plugin, so a bare `docker build` falls back to
+# the LEGACY builder — which reads only the root .dockerignore and ignores per-Dockerfile ignore files
+# (`<Dockerfile>.dockerignore`). fvt-traffic depends on exactly that: the root .dockerignore strips
+# README.md, and Dockerfile.fvt.dockerignore un-strips it, so the legacy builder fails its
+# `COPY README.md` with "file not found". BuildKit (which colima's daemon supports) reads the
+# per-Dockerfile ignore file and builds it correctly — and it is also how the host's deploy.sh always
+# built, which is why this only broke once the build moved to the runner.
+export DOCKER_BUILDKIT=1
+
 COMPONENT="${1:?usage: build.sh <component> <version> <source-dir>}"
 VERSION="${2:?}"
 SRC="${3:?}"   # the app repo, checked out at the tag. May hold ONE component or several.
