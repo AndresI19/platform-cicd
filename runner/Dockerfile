@@ -32,6 +32,17 @@ RUN curl -fsSLo /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/v1.32.0/bin/linux/amd64/kubectl" \
  && chmod +x /usr/local/bin/kubectl
 
+# buildx — the BuildKit builder, installed as a docker CLI plugin. The static docker CLI above ships
+# NO build plugins, and modern `docker build` requires buildx: the legacy builder is gone, so a bare
+# build (or DOCKER_BUILDKIT=1) errors with "buildx component is missing". buildx is needed for its own
+# sake too — it honors per-Dockerfile ignore files (Dockerfile.fvt.dockerignore), which the legacy
+# builder never read, and which fvt-traffic's `COPY README.md` depends on. The "default" builder it
+# uses is backed by colima's daemon over the mounted socket, so builds land in that daemon and push.
+RUN mkdir -p /usr/local/lib/docker/cli-plugins \
+ && curl -fsSL "https://github.com/docker/buildx/releases/download/v0.19.3/buildx-v0.19.3.linux-amd64" \
+      -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+ && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+
 RUN useradd -m -u 1001 runner
 WORKDIR /home/runner
 
