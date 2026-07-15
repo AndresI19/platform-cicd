@@ -9,21 +9,19 @@
 #     context and would need a runner registered there.
 #   * Therefore the runner lives here, and here only. No app repo can reach it at all — not by label,
 #     not by a crafted workflow, not from a fork. It does not exist in their world.
-#   * And because there is exactly ONE runner, every component's deploy is serialized for free: the
-#     runner takes one job at a time off GitHub's job-assignment queue. See the note below on why a
-#     concurrency group is the WRONG way to get that, and is deliberately absent.
+#   * And because there is exactly ONE runner, every deploy is serialized for free: the runner takes
+#     one job at a time off GitHub's job-assignment queue. A concurrency group is the WRONG way to get
+#     that (it CANCELS excess pending jobs) and is deliberately absent.
+#
+# ONE dispatch per repo-release, carrying that repo's whole component list. A repo that ships several
+# components (project-platform → home + platform-auth; rs-mcp-server → rs-mcp-server + fvt-traffic)
+# deploys them together in this one job and reports them in ONE Discord message — rather than a
+# separate ping per component for what is really a single release at a single tag.
 name: release
 
 on:
   repository_dispatch:
     types: [release]
-
-# NO concurrency group. It is tempting to add one to "serialize deploys", but GitHub's concurrency
-# only ever keeps ONE running + ONE pending job per group and CANCELS the rest — so five deploys
-# arriving together lose three, silently. The serialization is already provided by there being exactly
-# ONE self-hosted runner: jobs wait in GitHub's job-assignment queue (which never cancels) until the
-# runner is free, and it takes them one at a time. The runner IS the queue. (If a second runner is
-# ever added for speed, this needs a real external lock — a concurrency group would still drop jobs.)
 
 jobs:
   release:
@@ -32,10 +30,10 @@ jobs:
       - name: The deploy scripts
         uses: actions/checkout@v4
 
-      # The component's source, at the exact tag the app repo just cut. Checking out by TAG rather
-      # than by SHA is deliberate: the tag IS the version, and building anything else would ship an
-      # image whose /version lies about what is in it.
-      - name: ${{ github.event.client_payload.component }} @ ${{ github.event.client_payload.version }}
+      # The source, at the exact tag the app repo just cut. All the repo's components build from this
+      # one checkout — they share the repo and the tag, which is the whole reason they share a message.
+      # Checking out by TAG (not SHA) is deliberate: the tag IS the version.
+      - name: ${{ github.event.client_payload.repo }} @ ${{ github.event.client_payload.version }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.client_payload.repo }}
@@ -43,66 +41,70 @@ jobs:
           path: src
           submodules: recursive # the quiz vendors @platform/ui as a submodule; without it, npm ci fails
 
-      - name: Build and publish
+      # Build + deploy every component in the release, attempting all of them even if one fails, and
+      # recording a per-component result the report step reads. NOT `set -e`: one component's failure
+      # must not skip the others or the report.
+      - name: Build and deploy
         run: |
-          ./deploy/build.sh \
-            "${{ github.event.client_payload.component }}" \
-            "${{ github.event.client_payload.version }}" \
-            src
+          set -uo pipefail
+          COMPONENTS="${{ github.event.client_payload.components || github.event.client_payload.component }}"
+          V="${{ github.event.client_payload.version }}"
+          RESULTS="${RUNNER_TEMP}/results.txt"; : > "$RESULTS"
+          overall=0
+          for c in $COMPONENTS; do
+            echo "::group::${c} ${V}"
+            prev="$(kubectl -n platform get deploy "$c" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
+            if ./deploy/build.sh "$c" "$V" src && ./deploy/deploy.sh "$c" "$V"; then
+              echo "${c}|ok|${prev}|registry:5000/${c}:${V}" >> "$RESULTS"
+            else
+              echo "${c}|fail|${prev}|-" >> "$RESULTS"; overall=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $overall
 
-      - name: Deploy
-        id: deploy
-        run: |
-          ./deploy/deploy.sh \
-            "${{ github.event.client_payload.component }}" \
-            "${{ github.event.client_payload.version }}"
-
-      # VISIBILITY. GitHub's own signals are all PULL — a red ✗ you have to go and look for. This
-      # platform's recurring bug is the SILENT one (units never installed, /version stuck on
-      # "snapshot", `minikube image load` no-oping while reporting success, and just now a concurrency
-      # group cancelling deploys with no trace). So every run — success OR failure — PUSHES its outcome
-      # to Discord and writes a job summary. You should never again have to poll an API in a loop to
-      # find out what a deploy did.
+      # VISIBILITY — one message for the whole release. GitHub's own signals are all PULL (a red ✗ you
+      # go looking for), and this platform's recurring bug is the SILENT one (units never installed,
+      # /version stuck on "snapshot", a concurrency group cancelling deploys with no trace). So every
+      # run PUSHES its outcome to Discord and writes a job summary, success OR failure (if: always()).
       - name: Report the outcome
         if: always()
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          C: ${{ github.event.client_payload.component }}
           V: ${{ github.event.client_payload.version }}
           REPO: ${{ github.event.client_payload.repo }}
-          PREV: ${{ steps.deploy.outputs.previous }}
-          IMG: ${{ steps.deploy.outputs.image }}
+          COMPONENTS: ${{ github.event.client_payload.components || github.event.client_payload.component }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          if [ "${{ job.status }}" = "success" ]; then
-            EMOJI="✅"; TITLE="deployed"; COLOR=3066993
-            BODY="**$C** → \`$V\`\nwas: \`${PREV:-?}\`\nnow: \`${IMG:-registry:5000/$C:$V}\`"
+          RESULTS="${RUNNER_TEMP}/results.txt"
+          if [ "${{ job.status }}" = "success" ]; then EMOJI="✅"; COLOR=3066993; else EMOJI="❌"; COLOR=15548997; fi
+
+          # One line per component, from the results file. If it is missing (a failure before the loop,
+          # e.g. checkout), fall back to marking the whole component list failed so the message still
+          # says something true.
+          body=""
+          summary="## ${EMOJI} ${REPO##*/} \`${V}\`"$'\n\n'"| component | status | image |"$'\n'"|---|---|---|"$'\n'
+          if [ -f "$RESULTS" ]; then
+            while IFS='|' read -r c st prev img; do
+              [ -z "$c" ] && continue
+              [ "$st" = ok ] && mark="✅" || { mark="❌"; img="—"; }
+              body="${body}${mark} \`${c}\` → \`${img}\`"$'\n'
+              summary="${summary}| \`${c}\` | ${st} | \`${img}\` |"$'\n'
+            done < "$RESULTS"
           else
-            EMOJI="❌"; TITLE="FAILED"; COLOR=15548997
-            BODY="**$C** \`$V\` from $REPO — nothing deployed, or rolled back."
+            for c in $COMPONENTS; do
+              body="${body}❌ \`${c}\` → build/deploy did not run"$'\n'
+              summary="${summary}| \`${c}\` | did-not-run | — |"$'\n'
+            done
           fi
 
-          # Job summary — the at-a-glance record in the Actions UI.
-          {
-            echo "## $EMOJI $C $TITLE"
-            echo ""
-            echo "| field | value |"
-            echo "|---|---|"
-            echo "| component | \`$C\` |"
-            echo "| version | \`$V\` |"
-            echo "| source | $REPO |"
-            echo "| previous image | \`${PREV:-—}\` |"
-            echo "| status | ${{ job.status }} |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
 
-          # Pushed to Discord — the running log you can watch without touching the API.
           [ -n "$WEBHOOK" ] || exit 0
-          # Build the description on ONE indented line — a bash ANSI-C newline ($'\n'), NOT a literal
-          # newline in the YAML. A line less-indented than this `run:` block would terminate the block
-          # scalar and make the workflow unparseable, which is exactly the bug this step first shipped
-          # with: GitHub failed it as a "workflow file issue" before a single step ran.
-          DESC="${BODY}"$'\n\n'"<${RUN_URL}>"
-          jq -n --arg t "$EMOJI release $TITLE — $C $V" --arg d "$DESC" --argjson c "$COLOR" \
+          # Description on properly-indented lines using bash $'\n' — a line less-indented than this
+          # run: block would terminate the YAML block scalar and make the workflow unparseable.
+          desc="${body}"$'\n'"<${RUN_URL}>"
+          jq -n --arg t "${EMOJI} release — ${REPO##*/} ${V}" --arg d "$desc" --argjson c "$COLOR" \
             '{username:"platform-cicd",embeds:[{title:$t,description:$d,color:$c}]}' \
             | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK" >/dev/null
