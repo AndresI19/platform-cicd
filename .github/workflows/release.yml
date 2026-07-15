@@ -54,10 +54,15 @@ jobs:
           for c in $COMPONENTS; do
             echo "::group::${c} ${V}"
             prev="$(kubectl -n platform get deploy "$c" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
-            if ./deploy/build.sh "$c" "$V" src && ./deploy/deploy.sh "$c" "$V"; then
-              echo "${c}|ok|${prev}|registry:5000/${c}:${V}" >> "$RESULTS"
+            # Record a per-component line: `component|status|detail`. On success detail is the image; on
+            # failure it is WHY, so the report can chart every component's fate — the failed ones say
+            # what happened (build failed / rolled back) rather than a bare mark.
+            if ! ./deploy/build.sh "$c" "$V" src; then
+              echo "${c}|fail|build failed" >> "$RESULTS"; overall=1
+            elif ! ./deploy/deploy.sh "$c" "$V"; then
+              echo "${c}|fail|rolled back to ${prev}" >> "$RESULTS"; overall=1
             else
-              echo "${c}|fail|${prev}|-" >> "$RESULTS"; overall=1
+              echo "${c}|ok|registry:5000/${c}:${V}" >> "$RESULTS"
             fi
             echo "::endgroup::"
           done
@@ -83,19 +88,27 @@ jobs:
           # One line per component, from the results file. If it is missing (a failure before the loop,
           # e.g. checkout), fall back to marking the whole component list failed so the message still
           # says something true.
+          # Same shape as the success message, which is the point: title carries the service + version,
+          # and each component charts on its own line. A success line ends in `→ \`image\``; a failure
+          # line ends in `— <what happened>`. So a mixed release (one up, one rolled back) reads as one
+          # coherent chart rather than a generic "FAILED".
           body=""
-          summary="## ${EMOJI} ${REPO##*/} \`${V}\`"$'\n\n'"| component | status | image |"$'\n'"|---|---|---|"$'\n'
+          summary="## ${EMOJI} ${REPO##*/} \`${V}\`"$'\n\n'"| component | result |"$'\n'"|---|---|"$'\n'
           if [ -f "$RESULTS" ]; then
-            while IFS='|' read -r c st prev img; do
+            while IFS='|' read -r c st detail; do
               [ -z "$c" ] && continue
-              [ "$st" = ok ] && mark="✅" || { mark="❌"; img="—"; }
-              body="${body}${mark} \`${c}\` → \`${img}\`"$'\n'
-              summary="${summary}| \`${c}\` | ${st} | \`${img}\` |"$'\n'
+              if [ "$st" = ok ]; then
+                body="${body}✅ \`${c}\` → \`${detail}\`"$'\n'
+                summary="${summary}| \`${c}\` | ✅ \`${detail}\` |"$'\n'
+              else
+                body="${body}❌ \`${c}\` — ${detail}"$'\n'
+                summary="${summary}| \`${c}\` | ❌ ${detail} |"$'\n'
+              fi
             done < "$RESULTS"
           else
             for c in $COMPONENTS; do
-              body="${body}❌ \`${c}\` → build/deploy did not run"$'\n'
-              summary="${summary}| \`${c}\` | did-not-run | — |"$'\n'
+              body="${body}❌ \`${c}\` — build/deploy did not run"$'\n'
+              summary="${summary}| \`${c}\` | ❌ did not run |"$'\n'
             done
           fi
 
