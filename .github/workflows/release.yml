@@ -98,8 +98,11 @@ jobs:
 
           # Pushed to Discord — the running log you can watch without touching the API.
           [ -n "$WEBHOOK" ] || exit 0
-          jq -n --arg t "$EMOJI release $TITLE — $C $V" --arg d "$BODY
-
-<$RUN_URL>" --argjson c "$COLOR" \
+          # Build the description on ONE indented line — a bash ANSI-C newline ($'\n'), NOT a literal
+          # newline in the YAML. A line less-indented than this `run:` block would terminate the block
+          # scalar and make the workflow unparseable, which is exactly the bug this step first shipped
+          # with: GitHub failed it as a "workflow file issue" before a single step ran.
+          DESC="${BODY}"$'\n\n'"<${RUN_URL}>"
+          jq -n --arg t "$EMOJI release $TITLE — $C $V" --arg d "$DESC" --argjson c "$COLOR" \
             '{username:"platform-cicd",embeds:[{title:$t,description:$d,color:$c}]}' \
-          | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK" >/dev/null
+            | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK" >/dev/null
