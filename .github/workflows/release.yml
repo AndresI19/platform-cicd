@@ -80,6 +80,14 @@ jobs:
           REPO: ${{ github.event.client_payload.repo }}
           COMPONENTS: ${{ github.event.client_payload.components || github.event.client_payload.component }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Provenance, gathered by the app repo's release.yml (which alone has the merge context) and
+          # passed in the dispatch. All optional: a direct/manual dispatch carries none, and the message
+          # simply omits the PR footer and link. Never interpolated into a command — read as env only.
+          PR: ${{ github.event.client_payload.pr }}
+          PR_URL: ${{ github.event.client_payload.pr_url }}
+          AUTHOR: ${{ github.event.client_payload.author }}
+          MERGER: ${{ github.event.client_payload.merger }}
+          BRANCH: ${{ github.event.client_payload.branch }}
         run: |
           set -euo pipefail
           RESULTS="${RUNNER_TEMP}/results.txt"
@@ -112,12 +120,30 @@ jobs:
             done
           fi
 
+          # Provenance footer: "PR #23 by author · merged by X · branch". Every part is conditional —
+          # the merger only appears when it differs from the author (the common case is they are the
+          # same person, and repeating it is noise), and the whole footer is empty for a dispatch that
+          # carried no PR (a manual/direct one), so those messages look exactly as before.
+          foot=""
+          if [ -n "${PR:-}" ]; then
+            foot="PR #${PR}"
+            [ -n "${AUTHOR:-}" ] && foot="${foot} by ${AUTHOR}"
+            [ -n "${MERGER:-}" ] && [ "${MERGER}" != "${AUTHOR:-}" ] && foot="${foot} · merged by ${MERGER}"
+            [ -n "${BRANCH:-}" ] && foot="${foot} · ${BRANCH}"
+          fi
+
           echo "$summary" >> "$GITHUB_STEP_SUMMARY"
 
           [ -n "$WEBHOOK" ] || exit 0
           # Description on properly-indented lines using bash $'\n' — a line less-indented than this
           # run: block would terminate the YAML block scalar and make the workflow unparseable.
           desc="${body}"$'\n'"<${RUN_URL}>"
+          # The embed is assembled with jq so the PR link (clickable title) and footer are added only
+          # when present — an object merge with {} when absent leaves the base embed untouched.
           jq -n --arg t "${EMOJI} release — ${REPO##*/} ${V}" --arg d "$desc" --argjson c "$COLOR" \
-            '{username:"platform-cicd",embeds:[{title:$t,description:$d,color:$c}]}' \
+            --arg url "${PR_URL:-}" --arg foot "$foot" \
+            '{username:"platform-cicd",
+              embeds:[( {title:$t, description:$d, color:$c}
+                        + (if $url  != "" then {url:$url}               else {} end)
+                        + (if $foot != "" then {footer:{text:$foot}}    else {} end) )]}' \
             | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK" >/dev/null
