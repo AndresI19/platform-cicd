@@ -51,25 +51,55 @@ jobs:
             src
 
       - name: Deploy
+        id: deploy
         run: |
           ./deploy/deploy.sh \
             "${{ github.event.client_payload.component }}" \
             "${{ github.event.client_payload.version }}"
 
-      # GitHub's own failure signals are all PULL — a red ✗ you have to go and look at. This platform's
-      # recurring bug is the silent failure (units never installed, /version stuck on "snapshot",
-      # `minikube image load` no-oping while reporting success), so a failure gets PUSHED, to the same
-      # webhook platform-boot.sh already uses.
-      - name: Say it broke
-        if: failure()
+      # VISIBILITY. GitHub's own signals are all PULL — a red ✗ you have to go and look for. This
+      # platform's recurring bug is the SILENT one (units never installed, /version stuck on
+      # "snapshot", `minikube image load` no-oping while reporting success, and just now a concurrency
+      # group cancelling deploys with no trace). So every run — success OR failure — PUSHES its outcome
+      # to Discord and writes a job summary. You should never again have to poll an API in a loop to
+      # find out what a deploy did.
+      - name: Report the outcome
+        if: always()
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          C: ${{ github.event.client_payload.component }}
+          V: ${{ github.event.client_payload.version }}
+          REPO: ${{ github.event.client_payload.repo }}
+          PREV: ${{ steps.deploy.outputs.previous }}
+          IMG: ${{ steps.deploy.outputs.image }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+          if [ "${{ job.status }}" = "success" ]; then
+            EMOJI="✅"; TITLE="deployed"; COLOR=3066993
+            BODY="**$C** → \`$V\`\nwas: \`${PREV:-?}\`\nnow: \`${IMG:-registry:5000/$C:$V}\`"
+          else
+            EMOJI="❌"; TITLE="FAILED"; COLOR=15548997
+            BODY="**$C** \`$V\` from $REPO — nothing deployed, or rolled back."
+          fi
+
+          # Job summary — the at-a-glance record in the Actions UI.
+          {
+            echo "## $EMOJI $C $TITLE"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| component | \`$C\` |"
+            echo "| version | \`$V\` |"
+            echo "| source | $REPO |"
+            echo "| previous image | \`${PREV:-—}\` |"
+            echo "| status | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Pushed to Discord — the running log you can watch without touching the API.
           [ -n "$WEBHOOK" ] || exit 0
-          curl -fsS -H 'Content-Type: application/json' -d "$(cat <<JSON
-          {"username":"platform-cicd","embeds":[{
-            "title":"❌ release FAILED — ${{ github.event.client_payload.component }} ${{ github.event.client_payload.version }}",
-            "description":"Nothing was deployed, or it was rolled back.\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>",
-            "color":15548997}]}
-          JSON
-          )" "$WEBHOOK"
+          jq -n --arg t "$EMOJI release $TITLE — $C $V" --arg d "$BODY
+
+<$RUN_URL>" --argjson c "$COLOR" \
+            '{username:"platform-cicd",embeds:[{title:$t,description:$d,color:$c}]}' \
+          | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK" >/dev/null

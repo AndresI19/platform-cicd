@@ -65,4 +65,15 @@ LIVE="$(kubectl -n "$NS" get deploy "$COMPONENT" \
   -o jsonpath='{.spec.template.spec.containers[0].image}')"
 [ "$LIVE" = "$IMAGE" ] || { echo "FATAL: expected ${IMAGE}, cluster says ${LIVE}" >&2; exit 1; }
 
-echo "==> Deployed ${COMPONENT} ${VERSION}"
+# Surface what happened, so the workflow can report it without re-deriving it. GITHUB_OUTPUT is only
+# set when running under Actions; skipped for a hand-run.
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  {
+    echo "component=${COMPONENT}"
+    echo "version=${VERSION}"
+    echo "previous=${PREVIOUS}"
+    echo "image=${IMAGE}"
+  } >> "$GITHUB_OUTPUT"
+fi
+
+echo "==> Deployed ${COMPONENT} ${VERSION}  (was: ${PREVIOUS})"
