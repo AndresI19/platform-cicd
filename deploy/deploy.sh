@@ -9,7 +9,7 @@
 #     old kustomize pins-vs-set-image conflict is gone. Every deploy is a versioned, rollback-able
 #     release revision, and the version-writer hook refreshes platform-version.json on EVERY one (the
 #     kubectl-set-image path never did, so /version silently drifted from what was running).
-#   * --atomic replaces the hand-rolled `rollout undo`: a failed upgrade rolls the release back to the
+#   * --rollback-on-failure replaces the hand-rolled `rollout undo`: a failed upgrade rolls the release back to the
 #     previous revision on its own. Because each component is its own upgrade, that reverts only the
 #     failing component, not ones already deployed earlier in the same release batch.
 #   * --reuse-values keeps every OTHER component's last-deployed image, so a per-component deploy leaves
@@ -46,7 +46,7 @@ curl -fsS --cacert /certs/ca.crt "https://registry:5000/v2/${COMPONENT}/tags/lis
 say "present"
 
 # --- 2. remember what we are replacing ----------------------------------------------------------
-# So the failure message can NAME what --atomic reverted to, rather than saying "rolled back".
+# So the failure message can NAME what --rollback-on-failure reverted to, rather than saying "rolled back".
 PREVIOUS="$(kubectl -n "$NS" get deploy "$COMPONENT" \
   -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
 say "currently running ${PREVIOUS}"
@@ -59,8 +59,8 @@ if ! helm upgrade "$RELEASE" "$CHART" -n "$NS" --reuse-values \
       --set "apps.${COMPONENT}.image.repo=registry:5000/${COMPONENT}" \
       --set "apps.${COMPONENT}.image.tag=${VERSION}" \
       --set "apps.${COMPONENT}.version=${VERSION}" \
-      --wait --atomic --force-conflicts --timeout 5m; then
-  echo "FATAL: ${COMPONENT} ${VERSION} failed to roll out; --atomic reverted to ${PREVIOUS}" >&2
+      --wait --rollback-on-failure --force-conflicts --timeout 5m; then
+  echo "FATAL: ${COMPONENT} ${VERSION} failed to roll out; --rollback-on-failure reverted to ${PREVIOUS}" >&2
   exit 1
 fi
 say "rolled out"
