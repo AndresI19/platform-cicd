@@ -41,6 +41,18 @@ jobs:
           path: src
           submodules: recursive # the quiz vendors @platform/ui as a submodule; without it, npm ci fails
 
+      # The chart. The deploy is `helm upgrade` now (the platform migrated off kustomize), and helm
+      # needs the chart source to render the release — deploy.sh reads it from ./orchestration/chart.
+      # `main`, not a tag: the chart's templates are stable and version-independent of the app images —
+      # only the image tags, passed as --set values, change per release. platform-orchestration is
+      # public, so the default GITHUB_TOKEN checks it out with no extra credential.
+      - name: The chart — platform-orchestration@main
+        uses: actions/checkout@v4
+        with:
+          repository: AndresI19/platform-orchestration
+          ref: main
+          path: orchestration
+
       # Build + deploy every component in the release, attempting all of them even if one fails, and
       # recording a per-component result the report step reads. NOT `set -e`: one component's failure
       # must not skip the others or the report.

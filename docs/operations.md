@@ -41,22 +41,18 @@ gh api -X POST repos/AndresI19/platform-cicd/dispatches -f event_type=release \
 To exercise the **full** chain instead, push an empty commit to the app repo's `main` (via a PR) —
 `version-tag` cuts a tag, `release.yml` dispatches, the runner deploys.
 
-## The pins conflict
+## The pins conflict (resolved by the Helm migration)
 
-There are **two deploy paths** that write the same Kubernetes deployments:
+Historically there were **two deploy paths** writing the same deployments: this CD set images
+imperatively (`kubectl set image`), while `kubectl apply -k` on platform-orchestration re-applied the
+image tags pinned *declaratively* in `kustomization.yaml` — so any `apply -k` reverted CD deploys to the
+pinned (old, side-loaded `platform-*`) images.
 
-- **this CI/CD** — sets `registry:5000/<c>:<version>` *imperatively* (`kubectl set image`)
-- **`kubectl apply -k` on platform-orchestration** — sets whatever `kustomization.yaml` *pins*,
-  *declaratively*, which is still the old side-loaded `platform-*` tags
-
-So **any `apply -k` reverts CD deploys** to the pinned images. Applying an orchestration change (a
-manifest, RBAC, config) also re-applies the image pins. After an `apply -k`, re-dispatch anything that
-had advanced past the pins.
-
-The durable fix is to remove image management from `kustomization.yaml` so the CD owns versions and
-`apply -k` only touches topology. Until then, the two paths overlap and last-writer-wins. Note
-`platform-orchestration` changes are **not** auto-applied — CI validates them, but someone runs
-`apply -k` by hand.
+That is **gone**. The platform deploys as a Helm release now, and image tags live in the release
+(server-side state), not a committed file — there is nothing for an apply to revert. Both the host
+deploy and this CD are `helm upgrade` against the same `platform` release, which is the single source
+of truth; `helm rollback platform <n>` is the deliberate revert. Note orchestration changes are still
+**not** auto-applied — the human runs the host `./k8s/deploy.sh`.
 
 ## Registry retention (not yet automated)
 

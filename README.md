@@ -2,8 +2,7 @@
 
 The platform's deploy path: a single self-hosted GitHub Actions runner and the scripts it runs. A
 merge to any app repo's `main` builds that component on this machine, pushes it to the local TLS
-registry, and rolls it out — reported to Discord, with no inbound port and a runner that cannot read
-the platform's secrets.
+registry, and rolls it out as a Helm release — reported to Discord, with no inbound port.
 
 ## The pieces
 
@@ -13,8 +12,8 @@ the platform's secrets.
 | `runner/Dockerfile` · `compose.yml` · `entrypoint.sh` | the self-hosted runner: ephemeral, buildx, on minikube's docker network |
 | `runner/runner.service` | systemd **user** unit that starts the runner at boot |
 | `deploy/build.sh` | build one component's image (a per-component registry of build contexts) and push it |
-| `deploy/deploy.sh` | `kubectl set image` the component, wait, verify, roll back on failure |
-| `scripts/kubeconfig.sh` | mint the least-privilege `deployer` kubeconfig for `runner/.env` |
+| `deploy/deploy.sh` | `helm upgrade` the `platform` release for the component, wait, verify, `--atomic` rollback on failure |
+| `scripts/kubeconfig.sh` | mint the scoped `deployer` kubeconfig for `runner/.env` |
 
 The matching half lives in each app repo as its own `release.yml`: on merge it reads the tag
 `version-tag.yml` cut and `repository_dispatch`es here. See [Deploy pipeline](docs/deploy-pipeline.md).

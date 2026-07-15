@@ -29,22 +29,24 @@ adding a mount would be the one thing that widens that window.
 ## The deployer identity
 
 The runner authenticates to Kubernetes as the `deployer` ServiceAccount (defined in
-`platform-orchestration/k8s/base/deployer-rbac.yaml`), **not** an admin kubeconfig. It could not use
-the admin one if it wanted to — those client certs live under `~/.minikube`, outside the mount. The
-boundary forced a least-privilege identity.
+`platform-orchestration/k8s/bootstrap/deployer-rbac.yaml`), **not** an admin kubeconfig. It could not
+use the admin one if it wanted to — those client certs live under `~/.minikube`, outside the mount. It
+is still not cluster-admin: it cannot touch Roles, RoleBindings, ServiceAccounts or SealedSecrets
+(those are bootstrap, applied by the human out-of-band), so a job cannot grant itself more or rewrite
+an identity.
 
-What it may do: `get/list/watch/patch/update` Deployments and ReplicaSets; `get/list/watch/create/delete`
-Pods and `create` pod/exec (to write the version spec). What it may **not** do:
+**The secrets trade.** The deploy is `helm upgrade` (the platform runs on Helm now), and Helm keeps its
+release state in a Secret in the namespace — so the identity is granted `secrets`. That grant cannot be
+narrowed to only the release Secret, so it also lets a job read the Postgres passwords, the auth signing
+key, and the Cloudflare tunnel token. This is a **deliberate widening** of the original "the deployer
+cannot read Secrets" boundary, accepted because this is a single-developer platform on one trusted
+machine: the threat that boundary guarded — a shared or hosted runner exfiltrating secrets — does not
+apply here. On a multi-tenant or hosted runner you would instead point Helm's storage at a separate,
+tightly-scoped namespace (or a non-Secret backend) and keep the app secrets off-limits.
 
-```
-kubectl auth can-i get secrets -n platform --as=system:serviceaccount:platform:deployer
-→ no
-```
-
-So a job on this runner cannot read the Postgres passwords, the Cloudflare tunnel token, or the auth
-signing key — all of which live as Secrets in the namespace. Deploying an image does not require
-reading them, so it cannot. (`watch` is not optional: `kubectl rollout status` opens a watch, and
-without it deploys falsely roll back — see
+What it may do: server-side-apply the release's Deployments, ReplicaSets, Services, ConfigMaps, Ingress
+and the version-writer Job; watch their rollout; and read/write the Helm release Secret. (`watch` is not
+optional: `helm --wait` opens a watch, and without it deploys falsely roll back — see
 [Troubleshooting → False rollback](troubleshooting.md#false-rollback-missing-rbac-watch).)
 
 ## The two tokens

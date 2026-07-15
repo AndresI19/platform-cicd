@@ -42,7 +42,9 @@ exists. See [Security → The two tokens](security.md#the-two-tokens).
 Triggered by `repository_dispatch: [release]`. Runs on `[self-hosted, platform]`. No concurrency
 group — see [Architecture → Serialization](architecture.md#serialization-the-runner-is-the-queue).
 
-1. **Checkout** the deploy scripts, and the component's source at the exact tag.
+1. **Checkout** three things: the deploy scripts (this repo), the component's source at the exact tag,
+   and the Helm chart from `platform-orchestration@main` (the deploy is `helm upgrade`, which needs the
+   chart to render the release).
 2. **Build and publish** — [`build.sh`](../deploy/build.sh).
 3. **Deploy** — [`deploy.sh`](../deploy/deploy.sh).
 4. **Report the outcome** — `if: always()`, posts ✅/❌ to Discord and writes a job summary, on
@@ -72,19 +74,25 @@ repo root by accident.
 
 ## Deploy
 
-`deploy.sh <component> <version>`, running as the least-privilege `deployer`:
+`deploy.sh <component> <version>`, running as the scoped `deployer` ServiceAccount:
 
 1. **Verify the image is in the registry** — by the **tags list**, not a manifest fetch. A manifest
    request pins a media type, and a registry answers `404` for a type it does not have stored; docker
    pushes OCI manifests, so asking for the old schema2 type reads a present image as missing. See
    [Troubleshooting → 404 on a present image](troubleshooting.md#404-on-a-present-image).
-2. **`kubectl set image`** the deployment.
-3. **`kubectl rollout status`** — and on failure, **`kubectl rollout undo`**. Fail-closed: a bad
-   image reverts to the previous one rather than leaving the site half-deployed.
+2. **`helm upgrade --reuse-values`** the `platform` release, setting only this component's image
+   repo/tag/version. `--reuse-values` keeps every other component's image, so the release stays
+   complete and the version-writer hook refreshes `platform-version.json` accurately — closing the gap
+   where `kubectl set image` left `/version` stale.
+3. **`--wait --atomic`** — a failed rollout reverts the release to the previous revision on its own;
+   because each component is its own upgrade, only the failing one reverts. **`--force-conflicts`**
+   because a legacy `kubectl set image` left `kubectl-set` owning the image field, and Helm 4's
+   server-side apply must be told to take it (the release is the source of truth, so forcing is right).
 4. **Read the running image back** and assert it matches — never trust the command that set it.
 
 The kubelet then pulls `registry:5000/<component>:<version>` of its own accord (a consequence of the
-new Pod spec) — no side-load. The acceptance test is the component's own `/version` endpoint.
+new Pod spec) — no side-load. Every deploy is a rollback-able Helm revision (`helm history platform`,
+`helm rollback platform <n>`). The acceptance test is the component's own `/version` endpoint.
 
 ## Verifying a deploy
 

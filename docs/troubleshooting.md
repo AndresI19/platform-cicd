@@ -107,11 +107,10 @@ a bash `$'\n'` on one indented line). Validate with a real YAML parser before pu
 
 ## A deploy silently reverts with no CI failure
 
-**Symptom:** a component that the CD deployed is back on an old `platform-*` image.
-
-**Cause:** someone ran `kubectl apply -k` on platform-orchestration, which re-applies the image pins
-in `kustomization.yaml`. The declarative apply reverts the CD's imperative `set image`. This is the
-**pins conflict** — see [Operations → The pins conflict](operations.md#the-pins-conflict).
-
-**Fix (interim):** re-dispatch the component. **Fix (durable):** remove image pins from
-`kustomization.yaml` so the CD owns versions.
+**This can no longer happen** — it was the **pins conflict**, fixed by the Helm migration. Historically
+a `kubectl apply -k` on platform-orchestration re-applied the image tags pinned in `kustomization.yaml`,
+reverting a CD `kubectl set image` back to an old `platform-*` image. Image tags now live in the Helm
+release, not a committed file, so an apply has nothing to revert, and there is no `apply -k` anymore.
+Kept here because the symptom — a component back on an old image after an unrelated orchestration change
+— was memorable, and this is where you would look. See
+[Operations → The pins conflict](operations.md#the-pins-conflict-resolved-by-the-helm-migration).
