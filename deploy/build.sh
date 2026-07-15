@@ -11,7 +11,7 @@ set -Eeuo pipefail
 
 COMPONENT="${1:?usage: build.sh <component> <version> <source-dir>}"
 VERSION="${2:?}"
-SRC="${3:?}"
+SRC="${3:?}"   # the app repo, checked out at the tag. May hold ONE component or several.
 
 IMAGE="registry:5000/${COMPONENT}:${VERSION}"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -24,13 +24,32 @@ args=(--build-arg "VERSION=${VERSION}"
       --build-arg "GIT_SHA=${GIT_SHA}"
       --build-arg "BUILD_DATE=${BUILD_DATE}")
 
-echo "==> Building ${IMAGE}"
+# The component registry — the single place that knows how each component is built. Two facts per
+# component: WHERE its build context sits inside the checkout, and any quirk (a build-arg, an alternate
+# Dockerfile). This is what lets one repo hold two components: project-platform is home + platform-auth
+# in two subdirectories, and rs-mcp-server is the server plus the fvt-traffic generator off a second
+# Dockerfile. The component name is enough to derive all of it, which is why the payload carries only
+# the name.
+CTX="$SRC"          # build context, defaults to the repo root
+DFILE=""            # explicit -f Dockerfile, empty = the context's own Dockerfile
+EXTRA=()            # per-component build-args
 case "$COMPONENT" in
+  home)          CTX="$SRC/portfolio-home" ;;
+  platform-auth) CTX="$SRC/platform-auth" ;;
   # BASE_PATH must be identical at build time and run time: Vite bakes the prefix into asset URLs at
   # build, Express mounts the routes beneath it at run. A mismatch gives a page whose assets all 404.
-  quiz) docker build -t "$IMAGE" "${args[@]}" --build-arg BASE_PATH=/cloud-developer-quiz/ "$SRC" ;;
-  *)    docker build -t "$IMAGE" "${args[@]}" "$SRC" ;;
+  quiz)          EXTRA=(--build-arg BASE_PATH=/cloud-developer-quiz/) ;;
+  vmcp)          : ;;  # repo root, no quirks
+  rs-mcp-server) : ;;  # repo root, the production Dockerfile
+  # The traffic generator ships from the SAME repo as rs-mcp-server, off a separate Dockerfile — it is
+  # deliberately not the production image (no test deps in the thing that serves MCP).
+  fvt-traffic)   DFILE="$SRC/Dockerfile.fvt" ;;
+  *) echo "FATAL: unknown component '${COMPONENT}' — add it to the registry in build.sh" >&2; exit 1 ;;
 esac
+[ -n "$DFILE" ] && args+=(-f "$DFILE")
+
+echo "==> Building ${IMAGE}  (context: ${CTX}${DFILE:+, -f ${DFILE##*/}})"
+docker build -t "$IMAGE" "${args[@]}" "${EXTRA[@]}" "$CTX"
 
 # :latest is a POINTER FOR HUMANS and nothing else. Nothing deploys it — a mutable tag is the exact
 # bug this platform's deploy was rewritten to kill (`:latest` + IfNotPresent means the kubelet never
