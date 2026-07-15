@@ -9,20 +9,21 @@
 #     context and would need a runner registered there.
 #   * Therefore the runner lives here, and here only. No app repo can reach it at all — not by label,
 #     not by a crafted workflow, not from a fork. It does not exist in their world.
-#   * And because every component's deploy is a job in THIS repo, the concurrency group below actually
-#     works. Concurrency groups are per-repository: five copies of a workflow in five repos would be
-#     five different groups, serializing nothing.
+#   * And because there is exactly ONE runner, every component's deploy is serialized for free: the
+#     runner takes one job at a time off GitHub's job-assignment queue. See the note below on why a
+#     concurrency group is the WRONG way to get that, and is deliberately absent.
 name: release
 
 on:
   repository_dispatch:
     types: [release]
 
-# ONE queue for the whole platform. `cancel-in-progress: false` is load-bearing: the default (true)
-# would cancel a queued quiz deploy the moment a vmcp deploy arrived — silently dropping a release.
-concurrency:
-  group: platform-deploy
-  cancel-in-progress: false
+# NO concurrency group. It is tempting to add one to "serialize deploys", but GitHub's concurrency
+# only ever keeps ONE running + ONE pending job per group and CANCELS the rest — so five deploys
+# arriving together lose three, silently. The serialization is already provided by there being exactly
+# ONE self-hosted runner: jobs wait in GitHub's job-assignment queue (which never cancels) until the
+# runner is free, and it takes them one at a time. The runner IS the queue. (If a second runner is
+# ever added for speed, this needs a real external lock — a concurrency group would still drop jobs.)
 
 jobs:
   release:
