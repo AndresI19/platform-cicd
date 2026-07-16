@@ -73,20 +73,29 @@ say "present"
 }
 say "values: ${VALUES}"
 
-# --- 3. remember what we are replacing ----------------------------------------------------------
+# --- 3. vendor the library subchart ---------------------------------------------------------------
+# charts/service declares a `platform-lib` dependency (file://../lib) that holds the shared platform.app
+# helper, and orchestration gitignores `charts/*/charts/` — the vendored copy is BUILT, never committed.
+# So the fresh checkout release.yml just made has a chart that cannot render until this runs; without it
+# every deploy dies on "found in Chart.yaml, but missing in charts/ directory". It resolves from the
+# adjacent path, so it needs no network and no repo to be added.
+helm dependency build "$CHART" >/dev/null 2>&1 \
+  || { echo "FATAL: could not vendor ${CHART}'s platform-lib dependency" >&2; exit 1; }
+
+# --- 4. remember what we are replacing ----------------------------------------------------------
 # So the check Job's failure message can NAME what it reverted to, rather than saying "rolled back".
 PREVIOUS="$(kubectl -n "$NS" get deploy "$COMPONENT" \
   -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
 say "currently running ${PREVIOUS}"
 
-# --- 4. the deploy ------------------------------------------------------------------------------
+# --- 5. the deploy ------------------------------------------------------------------------------
 # --install: the first per-component deploy CREATES this release (the umbrella owned these objects).
 # --take-ownership: and adopts the objects the umbrella release still holds — without it Helm refuses to
 #   touch a resource annotated for another release. It stays on afterwards for the same reason
 #   --force-conflicts does: CI is authoritative, and a manual hotfix must never make the next deploy fail.
 # --force-conflicts: legacy field managers (`kubectl set image`, the old umbrella) own fields Helm 4's
 #   server-side apply must be told to take. The chart/release IS the source of truth.
-# No --wait: step 5 launches the watcher. No --reuse-values: see the header.
+# No --wait: step 6 launches the watcher. No --reuse-values: see the header.
 echo "==> helm upgrade ${RELEASE}: ${COMPONENT} → ${VERSION}"
 if ! helm upgrade --install "$RELEASE" "$CHART" -n "$NS" -f "$VALUES" \
       --set "image.repo=registry:5000/${COMPONENT}" \
@@ -98,7 +107,7 @@ if ! helm upgrade --install "$RELEASE" "$CHART" -n "$NS" -f "$VALUES" \
 fi
 say "applied"
 
-# --- 5. verify the SPEC, then hand the ROLLOUT to the cluster ------------------------------------
+# --- 6. verify the SPEC, then hand the ROLLOUT to the cluster ------------------------------------
 # Read the spec back rather than trusting the command that set it — every silent failure this platform
 # has had was a step that reported success without being checked. This asserts what helm just wrote; it
 # says nothing about readiness, which is deliberately the Job's job and not the runner's.
@@ -106,12 +115,21 @@ LIVE="$(kubectl -n "$NS" get deploy "$COMPONENT" \
   -o jsonpath='{.spec.template.spec.containers[0].image}')"
 [ "$LIVE" = "$IMAGE" ] || { echo "FATAL: expected ${IMAGE}, cluster says ${LIVE}" >&2; exit 1; }
 
-# envsubst is given an EXPLICIT list, and that is load-bearing: rollout-check.yaml's container script
-# reads $WEBHOOK at runtime, inside the pod, from a secret. A bare `envsubst` substitutes every name it
-# knows — including that one, to the runner's empty value — and the alert would be silently disabled.
+# sed, not envsubst, for two reasons. The runner image has no gettext-base (so no envsubst) and
+# runner.service brings the container up with `compose up -d` — never `--build` — so a deploy script
+# that needed a new package would fail on the next release and keep failing until someone rebuilt the
+# image by hand. sed is in every image there will ever be.
+#
+# Substituting an EXPLICIT five is load-bearing either way: rollout-check.yaml's container script reads
+# $WEBHOOK at runtime, INSIDE the pod, from a secret. Anything that substitutes every name it knows
+# would replace that with the runner's empty value and silently disable the alert.
 echo "==> Launching ${COMPONENT}-rollout-check (${ROLLOUT_TIMEOUT})"
-export COMPONENT IMAGE PREVIOUS K8S_IMAGE ROLLOUT_TIMEOUT
-envsubst '$COMPONENT $IMAGE $PREVIOUS $K8S_IMAGE $ROLLOUT_TIMEOUT' < deploy/rollout-check.yaml \
+sed -e "s|\${COMPONENT}|${COMPONENT}|g" \
+    -e "s|\${IMAGE}|${IMAGE}|g" \
+    -e "s|\${PREVIOUS}|${PREVIOUS}|g" \
+    -e "s|\${K8S_IMAGE}|${K8S_IMAGE}|g" \
+    -e "s|\${ROLLOUT_TIMEOUT}|${ROLLOUT_TIMEOUT}|g" \
+    deploy/rollout-check.yaml \
   | kubectl -n "$NS" replace --force -f - >/dev/null
 say "watching in-cluster; runner is free"
 
