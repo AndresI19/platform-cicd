@@ -1,0 +1,26 @@
+# The FVT traffic runner, on the host — deliberately OUTSIDE the cluster.
+#
+# It replays the function-verification suite through the vMCP gateway on a loop, which is what keeps
+# the platform dashboard's "Recent Calls" populated. It used to be a Pod (platform-orchestration's
+# `fvt-traffic` Deployment); it was moved here for two reasons:
+#
+#   * vMCP verifies JWT signatures now, so the runner must sign in to platform-auth for a REAL token
+#     like any other client — the in-cluster forged bearer it used to mint is rejected outright.
+#   * Driving the PUBLIC endpoint (Cloudflare → nginx → vmcp) makes this a genuine end-to-end smoke
+#     test of the same route a real MCP client takes, not an internal shortcut.
+#
+# Unlike runner/compose.yml this does NOT join the minikube network: it reaches the platform through
+# the public API over the internet, so it needs no in-cluster address. The image is still PULLED from
+# registry:5000 — colima's daemon trusts that CA and resolves the pinned host — but only the pull
+# touches the registry; the running container just needs outbound HTTPS.
+services:
+  fvt-traffic:
+    image: registry:5000/fvt-traffic:latest
+    container_name: platform-fvt-traffic
+    # Pull the newest :latest whenever compose (re)creates — the systemd unit runs `up --pull always`,
+    # so a restart after a CI build picks the new image up.
+    pull_policy: always
+    # A traffic generator that dies and stays dead is worthless — respawn it always. The script's own
+    # `while true` handles a failed RUN (it logs and continues); this handles the PROCESS exiting.
+    restart: always
+    env_file: [.env]

@@ -1,2 +1,5 @@
 # The runner's credentials. A PAT and a cluster token; neither has any business in git.
 runner/.env
+
+# The FVT runner's credential (FVT_CODE). Same rule.
+fvt/.env
