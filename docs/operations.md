@@ -48,11 +48,18 @@ imperatively (`kubectl set image`), while `kubectl apply -k` on platform-orchest
 image tags pinned *declaratively* in `kustomization.yaml` — so any `apply -k` reverted CD deploys to the
 pinned (old, side-loaded `platform-*`) images.
 
-That is **gone**. The platform deploys as a Helm release now, and image tags live in the release
-(server-side state), not a committed file — there is nothing for an apply to revert. Both the host
-deploy and this CD are `helm upgrade` against the same `platform` release, which is the single source
-of truth; `helm rollback platform <n>` is the deliberate revert. Note orchestration changes are still
-**not** auto-applied — the human runs the host `./k8s/deploy.sh`.
+That is **gone**. The platform deploys as Helm releases now, and image tags live in the release
+(server-side state), not a committed file — there is nothing for an apply to revert.
+
+It is **six releases, not one**: `platform-infra` (the router, the databases, the tunnel, the config)
+plus one per service. Both the host deploy (`./k8s/deploy.sh`) and this CD run `helm upgrade` against
+those same releases, from the same charts and the same `deploy/<component>.values.yaml` files — the
+one owned by the repo that ships each service. They differ only in where the image comes from: CD
+pulls `registry:5000/<name>:<version>`; the host side-loads `platform-<name>:<tag>`.
+
+The deliberate revert is therefore **per component**: `helm rollback quiz <n>` puts that service back
+without touching its siblings. Note orchestration changes are still **not** auto-applied — the human
+runs the host `./k8s/deploy.sh`.
 
 ## Registry retention (not yet automated)
 

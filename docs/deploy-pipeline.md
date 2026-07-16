@@ -80,19 +80,55 @@ repo root by accident.
    request pins a media type, and a registry answers `404` for a type it does not have stored; docker
    pushes OCI manifests, so asking for the old schema2 type reads a present image as missing. See
    [Troubleshooting → 404 on a present image](troubleshooting.md#404-on-a-present-image).
-2. **`helm upgrade --reuse-values`** the `platform` release, setting only this component's image
-   repo/tag/version. `--reuse-values` keeps every other component's image, so the release stays
-   complete and the version-writer hook refreshes `platform-version.json` accurately — closing the gap
-   where `kubectl set image` left `/version` stale.
-3. **`--wait --atomic`** — a failed rollout reverts the release to the previous revision on its own;
-   because each component is its own upgrade, only the failing one reverts. **`--force-conflicts`**
-   because a legacy `kubectl set image` left `kubectl-set` owning the image field, and Helm 4's
-   server-side apply must be told to take it (the release is the source of truth, so forcing is right).
-4. **Read the running image back** and assert it matches — never trust the command that set it.
+2. **Refuse a component that ships no values.** Each service's Deployment/Service spec lives in the
+   repo that ships it, as `deploy/<component>.values.yaml`. Without this check the upgrade would still
+   "succeed" — against the generic chart's own defaults, which describe no real service — and deploy a
+   component-shaped nothing.
+3. **Vendor the library subchart** (`helm dependency build`). `charts/service` depends on
+   `platform-lib`, and orchestration gitignores the vendored copy, so the fresh checkout cannot render
+   until this runs.
+4. **`helm upgrade --install <component>`** — that component's **own release**, rendered from
+   orchestration's generic `charts/service` plus the values file from step 2, with only
+   `image.repo/tag/version` set per deploy.
+
+   There is **no `--reuse-values`**, and its absence is the point. The umbrella release rendered every
+   app from one `.Values.apps` map, so a per-component deploy needed that flag to avoid wiping its
+   siblings' image tags — which made the *release*, not the chart, the source of truth, and broke both
+   directions: a key deleted from the chart lived on in release state forever, and a key added never
+   reached an existing release. Now the values come from the component's own repo, in full, on every
+   deploy: the file **is** the state, and nothing accumulates.
+
+   **`--take-ownership`** so the first per-component deploy adopts objects a previous release held, and
+   **`--force-conflicts`** because legacy field managers (`kubectl set image`, the old umbrella) own the
+   image field and Helm 4's server-side apply must be told to take it. Both stay on: CI is
+   authoritative, and a manual hotfix must never make the next deploy fail.
+5. **No `--wait`.** The upgrade returns once the manifests are applied. **Exit 0 means APPLIED AND
+   BEING WATCHED, not "rolled out"** — see [Asynchronous rollout](#asynchronous-rollout) below.
+6. **Read the running image back** and assert it matches — never trust the command that set it. This
+   asserts what Helm just wrote to the **spec**; it says nothing about readiness, which is the Job's
+   job, not the runner's.
 
 The kubelet then pulls `registry:5000/<component>:<version>` of its own accord (a consequence of the
-new Pod spec) — no side-load. Every deploy is a rollback-able Helm revision (`helm history platform`,
-`helm rollback platform <n>`). The acceptance test is the component's own `/version` endpoint.
+new Pod spec) — no side-load. Every deploy is a rollback-able Helm revision, **per component**:
+`helm history quiz`, `helm rollback quiz <n>` revert that service alone, without touching its
+siblings. The acceptance test is the component's own `/version` endpoint.
+
+### Asynchronous rollout
+
+The runner is a single, ephemeral, serialized worker: every second it spends watching a rollout is a
+second the next release waits in the queue. So `deploy.sh` applies and then launches
+`deploy/rollout-check.yaml` — a Job that watches the rollout **in the cluster**, where watching is free.
+The runner is released in ~0.5s.
+
+This is safe **because of** RollingUpdate, not in spite of it: an image that never becomes ready cannot
+displace the healthy old pods, so a failed deploy degrades to "the old version is still serving", never
+to an outage. The Job turns a *silent* stuck rollout into a loud, reverted one — `helm rollback` (which
+keeps Helm's state and the cluster in sync, unlike `kubectl rollout undo`), then a Discord post.
+
+The consequence for reading a release run: a green ✅ is the **apply**. A rollout that starts and then
+stalls cannot be reported by the workflow at all, because the runner is long gone — that failure
+arrives from the Job, minutes later, in Discord. A red ❌ from the workflow means the deploy never
+started (bad manifest, image not in the registry) and nothing changed.
 
 ## Verifying a deploy
 
