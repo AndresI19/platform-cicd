@@ -1,0 +1,35 @@
+# Brings the FVT traffic runner up at boot.
+#
+# The runner is a docker compose service, and `docker compose up` is a thing someone has to run.
+# Without this unit, every reboot leaves the platform with no demo traffic and the dashboard's Recent
+# Calls empty until someone logs in and starts it by hand — the same silent-after-reboot failure the
+# other host units (colima.service, platform.service, runner.service) exist to prevent.
+#
+# A *user* unit, like the others, because the docker socket and this compose project belong to this
+# user. Under `loginctl enable-linger` a user unit starts at boot with no login session — WITHOUT
+# LINGER THIS UNIT WILL NOT RUN AT BOOT, exactly like the other three.
+[Unit]
+Description=platform FVT traffic runner
+# Requires= colima for the docker daemon: with the VM down there is no daemon for `docker compose`.
+# After=/Wants= platform.service because the image is PULLED from registry:5000, which platform boot
+# starts — Wants, not Requires, so a slow platform just means Restart=on-failure retries until the
+# registry answers rather than failing permanently on a start-order race. Note it does NOT need the
+# minikube network: the runner talks to the PUBLIC API, and only the image pull touches the registry.
+After=colima.service platform.service network-online.target
+Requires=colima.service
+Wants=platform.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+# --pull always so a restart picks up the newest CI build of :latest (compose recreates the container
+# if the pulled digest changed). docker's `restart: always` keeps it alive between systemd's up/down.
+ExecStart=/home/linuxbrew/.linuxbrew/bin/docker compose -f %h/git-workspace/claude-workspace/platform-cicd/fvt/compose.yml up -d --pull always
+ExecStop=/home/linuxbrew/.linuxbrew/bin/docker compose -f %h/git-workspace/claude-workspace/platform-cicd/fvt/compose.yml down
+# Retry until platform.service has started the registry (a cold boot is ~5 minutes).
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=default.target

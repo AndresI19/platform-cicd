@@ -62,7 +62,7 @@ each component builds:
 | `quiz` | `src` | `--build-arg BASE_PATH=/cloud-developer-quiz/` |
 | `vmcp` | `src` | — |
 | `rs-mcp-server` | `src` | — |
-| `fvt-traffic` | `src` | `-f Dockerfile.fvt` |
+| `fvt-traffic` | `src` | `-f Dockerfile.fvt` · **built only, not deployed** — runs on the host (`fvt/`) |
 
 Every image takes `VERSION` / `GIT_SHA` / `BUILD_DATE` build-args. `VERSION` is baked into a `VERSION`
 file the app serves from `/version`. The image is pushed to `registry:5000/<component>:<version>` and

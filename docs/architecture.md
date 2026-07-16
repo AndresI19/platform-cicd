@@ -54,6 +54,10 @@ component** at the same repo tag; each becomes its own serialized deploy job her
 [`deploy/build.sh`](../deploy/build.sh) knows, per component, where its build context sits and any
 quirk (a build-arg, an alternate Dockerfile) — see [Deploy pipeline](deploy-pipeline.md#build).
 
+`fvt-traffic` is the one component that is **built but not deployed to the cluster**: it runs on the
+host (`fvt/compose.yml`) and drives the public API, so the release job builds and pushes its image and
+then skips the helm-deploy. The host adopts a new image on `systemctl --user restart fvt`.
+
 ## Why the deployer is inside the network, not on the host
 
 The runner joins minikube's docker network, so it reaches the apiserver at its **native** address

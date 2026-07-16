@@ -53,7 +53,8 @@ say "currently running ${PREVIOUS}"
 
 # --- 3. the deploy ------------------------------------------------------------------------------
 # --reuse-values keeps the other components' images; only this one's repo/tag/version change. The chart
-# app key IS the component name (home, quiz, vmcp, rs-mcp-server, platform-auth, fvt-traffic).
+# app key IS the component name (home, quiz, vmcp, rs-mcp-server, platform-auth). fvt-traffic is NOT a
+# chart app — it runs on the host, and release.yml never calls this script for it.
 echo "==> helm upgrade ${RELEASE}: ${COMPONENT} → ${VERSION}"
 if ! helm upgrade "$RELEASE" "$CHART" -n "$NS" --reuse-values \
       --set "apps.${COMPONENT}.image.repo=registry:5000/${COMPONENT}" \
