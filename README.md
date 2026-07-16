@@ -13,7 +13,8 @@ registry, and rolls it out as a Helm release — reported to Discord, with no in
 | `runner/runner.service` | systemd **user** unit that starts the runner at boot |
 | `fvt/compose.yml` · `fvt.service` | the FVT traffic runner: a host container that drives the **public** API on a loop (was a cluster Pod) |
 | `deploy/build.sh` | build one component's image (a per-component registry of build contexts) and push it |
-| `deploy/deploy.sh` | `helm upgrade` the `platform` release for the component, wait, verify, roll back on failure |
+| `deploy/deploy.sh` | `helm upgrade` the component's **own** release, verify the spec, hand the rollout to the cluster — applied, not awaited |
+| `deploy/rollout-check.yaml` | the Job that watches that rollout in-cluster and rolls the release back (+ Discord) if it stalls |
 | `scripts/kubeconfig.sh` | mint the scoped `deployer` kubeconfig for `runner/.env` |
 
 The matching half lives in each app repo as its own `release.yml`: on merge it reads the tag
