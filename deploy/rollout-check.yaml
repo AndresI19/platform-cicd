@@ -1,0 +1,78 @@
+# Async rollout check — the safety net that replaces the synchronous `helm upgrade --wait
+# --rollback-on-failure`. deploy.sh applies a component's release WITHOUT --wait (so the runner returns
+# immediately and deploys overlap), then launches this Job. It runs IN THE CLUSTER, decoupled from the
+# ephemeral runner, so the runner is free the instant the manifests are applied.
+#
+# The Job watches the new rollout. Kubernetes' RollingUpdate already protects availability — a new image
+# that fails readiness never displaces the healthy old pods — so this Job's job is to turn a *silent*
+# stuck rollout into a loud, reverted one:
+#   * rollout succeeds  → exit 0 (the ttl cleans the Job up).
+#   * rollout fails     → `helm rollback` the release to the last good revision (keeps Helm state and the
+#                         cluster in sync, unlike `kubectl rollout undo`), ping Discord, exit 1.
+#
+# Runs as the `deployer` ServiceAccount (already granted deployments watch/patch + the release Secrets),
+# hardened like every other workload. alpine/k8s carries kubectl + helm + curl in one small image.
+#
+# deploy.sh fills ${COMPONENT} / ${IMAGE} / ${PREVIOUS} / ${K8S_IMAGE} / ${ROLLOUT_TIMEOUT} via envsubst.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${COMPONENT}-rollout-check
+  namespace: platform
+  labels:
+    app: rollout-check
+    component: ${COMPONENT}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  activeDeadlineSeconds: 420
+  template:
+    metadata:
+      labels:
+        app: rollout-check
+        component: ${COMPONENT}
+    spec:
+      serviceAccountName: deployer
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 0
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: check
+          image: ${K8S_IMAGE}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: DISCORD_WEBHOOK_URL
+                  optional: true
+          command:
+            - sh
+            - -c
+            - |
+              set -u
+              if kubectl -n platform rollout status "deploy/${COMPONENT}" --timeout=${ROLLOUT_TIMEOUT}; then
+                echo "rollout ok: ${COMPONENT} -> ${IMAGE}"
+                exit 0
+              fi
+              echo "rollout FAILED for ${COMPONENT} (${IMAGE}) — rolling back the release" >&2
+              helm rollback "${COMPONENT}" -n platform || kubectl -n platform rollout undo "deploy/${COMPONENT}" || true
+              if [ -n "${WEBHOOK:-}" ]; then
+                curl -fsS -X POST -H 'Content-Type: application/json' \
+                  --retry 3 --retry-all-errors \
+                  -d "{\"username\":\"platform-cicd\",\"content\":\":x: rollout failed: \`${COMPONENT}\` \`${IMAGE}\` never became ready — release rolled back (was \`${PREVIOUS}\`). Old pods kept serving; nothing went down.\"}" \
+                  "$WEBHOOK" >/dev/null || true
+              fi
+              exit 1
+      volumes: []
