@@ -44,7 +44,10 @@ jobs:
           submodules: recursive # the quiz vendors @platform/ui as a submodule; without it, npm ci fails
 
       # The chart. The deploy is `helm upgrade` now (the platform migrated off kustomize), and helm
-      # needs the chart source to render the release — deploy.sh reads it from ./orchestration/chart.
+      # needs the chart source to render the release — deploy.sh reads the GENERIC service chart from
+      # ./orchestration/charts/service. It is generic on purpose: it carries no per-service values at
+      # all, and each component's Deployment/Service spec comes from its OWN repo (src/deploy/*.yaml),
+      # checked out above. Orchestration owns the shared shape; the app repos own their resources.
       # `main`, not a tag: the chart's templates are stable and version-independent of the app images —
       # only the image tags, passed as --set values, change per release. platform-orchestration is
       # public, so the default GITHUB_TOKEN checks it out with no extra credential.
@@ -70,7 +73,13 @@ jobs:
             prev="$(kubectl -n platform get deploy "$c" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
             # Record a per-component line: `component|status|detail`. On success detail is the image; on
             # failure it is WHY, so the report can chart every component's fate — the failed ones say
-            # what happened (build failed / rolled back) rather than a bare mark.
+            # what happened (build failed / not applied) rather than a bare mark.
+            #
+            # A deploy is ASYNCHRONOUS now (deploy/deploy.sh applies, an in-cluster Job watches). So a
+            # failure here means the deploy never STARTED — the manifests were rejected, or the image
+            # was not in the registry — and nothing changed: prev is still serving. A rollout that
+            # starts and then stalls cannot be reported from this job at all, because the runner is long
+            # gone by then; the Job posts that to Discord itself. Hence "deploying", not "deployed".
             if ! ./deploy/build.sh "$c" "$V" src; then
               echo "${c}|fail|build failed" >> "$RESULTS"; overall=1
             elif [ "$c" = fvt-traffic ]; then
@@ -80,9 +89,9 @@ jobs:
               # skipped. Refresh the host with `systemctl --user restart fvt` after a release.
               echo "${c}|ok|registry:5000/${c}:${V} (host runner — image built; restart fvt to adopt)" >> "$RESULTS"
             elif ! ./deploy/deploy.sh "$c" "$V"; then
-              echo "${c}|fail|rolled back to ${prev}" >> "$RESULTS"; overall=1
+              echo "${c}|fail|not applied — ${prev} still running" >> "$RESULTS"; overall=1
             else
-              echo "${c}|ok|registry:5000/${c}:${V}" >> "$RESULTS"
+              echo "${c}|ok|registry:5000/${c}:${V} (deploying — rollout-check reports)" >> "$RESULTS"
             fi
             echo "::endgroup::"
           done
