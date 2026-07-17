@@ -1,54 +1,51 @@
 # The self-hosted runner: the only consumer that can reach the registry and the cluster.
 #
-# It runs as a CONTAINER rather than natively under its own unix user, and the reason is the colima
-# mount. The VM mounts exactly one host directory, so a container here cannot see ~/.ssh, the
-# Cloudflare tunnel token in .env, or the sealed-secrets master key — those paths do not exist inside
-# the VM at all. That boundary is what makes a container acceptable without a dedicated unix account.
+# It runs as a CONTAINER, not natively under its own unix user, because of the colima mount: the VM
+# mounts exactly one host directory, so a container here cannot see ~/.ssh, the tunnel token, or the
+# sealed-secrets master key — those paths do not exist inside the VM. That boundary makes a container
+# acceptable without a dedicated unix account.
 FROM ubuntu:24.04
 
-# Keep current. GitHub deprecates old runner versions SERVER-SIDE: a runner too far behind connects,
-# is told "deprecated and cannot receive messages", and exits — jobs then queue forever with no
-# runner able to accept them. Because we build with --disableupdate (the runner must never rewrite its
-# own bin/), staying current is this ARG's job. Bump it when GitHub starts rejecting the pinned one.
+# Keep current. GitHub deprecates old runner versions SERVER-SIDE: a too-old runner connects, is told
+# "deprecated and cannot receive messages", and exits — jobs then queue forever. With --disableupdate
+# (the runner must never rewrite its own bin/), staying current is this ARG's job. Bump it when GitHub
+# starts rejecting the pinned one.
 ARG RUNNER_VERSION=2.335.1
 ENV DEBIAN_FRONTEND=noninteractive
 
 # curl/jq: fetch the registration token. git: check the app repo out. gosu: drop root after fixing the
-# docker socket's group (the runner refuses to run as root, and rightly).
+# docker socket's group (the runner refuses to run as root).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl jq git gosu tar gzip libicu74 \
  && rm -rf /var/lib/apt/lists/*
 
-# The docker CLI only — NOT a daemon. It talks to colima's daemon over the mounted socket, which is
-# also what gives builds a warm layer cache that survives this container being destroyed after every
-# job. Ephemerality therefore costs no build time.
+# The docker CLI only — NOT a daemon. It talks to colima's daemon over the mounted socket, which also
+# gives builds a warm layer cache that survives this container being destroyed after every job.
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-28.0.1.tgz \
       | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
 
-# kubectl, to talk to the apiserver at its NATIVE address (192.168.49.2:8443) — reachable from this
-# container because it joins minikube's docker network, and unreachable from the host, which is the
-# whole reason three scripts on the host exist to repoint kubeconfig.
+# kubectl, to talk to the apiserver at its NATIVE address (192.168.49.2:8443) — reachable because this
+# container joins minikube's docker network, unreachable from the host (the reason host scripts repoint
+# kubeconfig).
 RUN curl -fsSLo /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/v1.32.0/bin/linux/amd64/kubectl" \
  && chmod +x /usr/local/bin/kubectl
 
-# helm — the deploy is `helm upgrade` now, not `kubectl set image`: the platform migrated off kustomize
-# and its image tags live in the Helm RELEASE (server-side state), so there is no committed file for a
-# later apply to revert. Pinned to the SAME major/version as the host that created the release (4.x):
+# helm — the deploy is `helm upgrade` (the platform migrated off kustomize; image tags live in the
+# Helm RELEASE, server-side state). Pinned to the SAME major as the host that created the release (4.x):
 # Helm 4 defaults to server-side apply and needs --force-conflicts to take fields a prior `kubectl set
-# image` owned, and a Helm 3 client on a Helm 4 release would risk both the apply semantics and the
-# release format. It reaches the cluster with the very same kubeconfig kubectl uses above.
+# image` owned, and a Helm 3 client on a Helm 4 release would risk the apply semantics and release
+# format. Reaches the cluster with the same kubeconfig kubectl uses above.
 ARG HELM_VERSION=4.2.3
 RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
       | tar -xz -C /usr/local/bin --strip-components=1 linux-amd64/helm \
  && chmod +x /usr/local/bin/helm
 
-# buildx — the BuildKit builder, installed as a docker CLI plugin. The static docker CLI above ships
-# NO build plugins, and modern `docker build` requires buildx: the legacy builder is gone, so a bare
-# build (or DOCKER_BUILDKIT=1) errors with "buildx component is missing". buildx is needed for its own
-# sake too — it honors per-Dockerfile ignore files (Dockerfile.fvt.dockerignore), which the legacy
-# builder never read, and which fvt-traffic's `COPY README.md` depends on. The "default" builder it
-# uses is backed by colima's daemon over the mounted socket, so builds land in that daemon and push.
+# buildx — the BuildKit builder, a docker CLI plugin. The static CLI ships NO build plugins, and modern
+# `docker build` requires buildx: the legacy builder is gone, so a bare build (or DOCKER_BUILDKIT=1)
+# errors "buildx component is missing". buildx also honors per-Dockerfile ignore files
+# (Dockerfile.fvt.dockerignore), which fvt-traffic's `COPY README.md` depends on. Its default builder is
+# backed by colima's daemon over the mounted socket.
 RUN mkdir -p /usr/local/lib/docker/cli-plugins \
  && curl -fsSL "https://github.com/docker/buildx/releases/download/v0.19.3/buildx-v0.19.3.linux-amd64" \
       -o /usr/local/lib/docker/cli-plugins/docker-buildx \

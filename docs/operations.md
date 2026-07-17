@@ -1,6 +1,6 @@
 # Operations
 
-Day-to-day: setting it up, watching it, re-running a deploy, and the one conflict to know about.
+Day-to-day: setup, watching it, re-running a deploy, and the one conflict to know about.
 
 ## First-time setup
 
@@ -14,13 +14,13 @@ Day-to-day: setting it up, watching it, re-running a deploy, and the one conflic
    printf 'KUBECONFIG_B64=%s\n' "$(scripts/kubeconfig.sh)" >> runner/.env
    ```
    (Requires `deployer-rbac.yaml` applied in the cluster, from platform-orchestration.)
-3. **The Discord webhook** for deploy notifications →
+3. **The Discord webhook** →
    `gh secret set DISCORD_WEBHOOK_URL --repo AndresI19/platform-cicd`.
 4. Start the runner and enable it at boot — see the README's *Run & connect*.
 
 ## Watching deploys
 
-Every deploy **pushes** its outcome — you should not have to poll:
+Every deploy **pushes** its outcome — no polling:
 
 - **Discord** — ✅ (with `was → now` images) or ❌, per component, to the CI/CD channel.
 - **GitHub** — the `Report the outcome` step writes a job summary; the Actions tab shows the queue.
@@ -38,32 +38,32 @@ gh api -X POST repos/AndresI19/platform-cicd/dispatches -f event_type=release \
   -F 'client_payload[version]=0.1.16'
 ```
 
-To exercise the **full** chain instead, push an empty commit to the app repo's `main` (via a PR) —
-`version-tag` cuts a tag, `release.yml` dispatches, the runner deploys.
+To exercise the **full** chain, push an empty commit to the app repo's `main` (via a PR) — `version-tag`
+cuts a tag, `release.yml` dispatches, the runner deploys.
 
 ## The pins conflict (resolved by the Helm migration)
 
-Historically there were **two deploy paths** writing the same deployments: this CD set images
-imperatively (`kubectl set image`), while `kubectl apply -k` on platform-orchestration re-applied the
-image tags pinned *declaratively* in `kustomization.yaml` — so any `apply -k` reverted CD deploys to the
-pinned (old, side-loaded `platform-*`) images.
+There were once **two deploy paths** writing the same deployments: this CD set images imperatively
+(`kubectl set image`), while `kubectl apply -k` on platform-orchestration re-applied the tags pinned
+*declaratively* in `kustomization.yaml` — so any `apply -k` reverted CD deploys to old, side-loaded
+`platform-*` images.
 
 That is **gone**. The platform deploys as Helm releases now, and image tags live in the release
-(server-side state), not a committed file — there is nothing for an apply to revert.
+(server-side state), not a committed file — nothing for an apply to revert.
 
-It is **six releases, not one**: `platform-infra` (the router, the databases, the tunnel, the config)
-plus one per service. Both the host deploy (`./k8s/deploy.sh`) and this CD run `helm upgrade` against
-those same releases, from the same charts and the same `deploy/<component>.values.yaml` files — the
-one owned by the repo that ships each service. They differ only in where the image comes from: CD
-pulls `registry:5000/<name>:<version>`; the host side-loads `platform-<name>:<tag>`.
+It is **six releases, not one**: `platform-infra` (router, databases, tunnel, config) plus one per
+service. Both the host deploy (`./k8s/deploy.sh`) and this CD run `helm upgrade` against those releases,
+from the same charts and the same `deploy/<component>.values.yaml` files (owned by the repo that ships
+each service). They differ only in the image source: CD pulls `registry:5000/<name>:<version>`, the host
+side-loads `platform-<name>:<tag>`.
 
 The deliberate revert is therefore **per component**: `helm rollback quiz <n>` puts that service back
-without touching its siblings. Note orchestration changes are still **not** auto-applied — the human
-runs the host `./k8s/deploy.sh`.
+without touching siblings. Note orchestration changes are still **not** auto-applied — the human runs the
+host `./k8s/deploy.sh`.
 
 ## Registry retention (not yet automated)
 
-The registry keeps every pushed tag. There is no automated pruning yet. When added, note: deletion is
-by digest (not tag), `:latest` shares a digest with the newest version, and
-`registry garbage-collect` is unsafe against concurrent pushes — so it must run inside the serialized
-deploy path, and the node's own image cache must be pruned separately.
+The registry keeps every pushed tag; there is no pruning yet. When added, note: deletion is by digest
+(not tag), `:latest` shares a digest with the newest version, and `registry garbage-collect` is unsafe
+against concurrent pushes — so it must run inside the serialized deploy path, and the node's own image
+cache must be pruned separately.

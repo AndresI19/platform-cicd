@@ -1,21 +1,20 @@
-# Async rollout check — the safety net that replaces the synchronous `helm upgrade --wait
+# Async rollout check — the safety net replacing the synchronous `helm upgrade --wait
 # --rollback-on-failure`. deploy.sh applies a component's release WITHOUT --wait (so the runner returns
-# immediately and deploys overlap), then launches this Job. It runs IN THE CLUSTER, decoupled from the
-# ephemeral runner, so the runner is free the instant the manifests are applied.
+# immediately and deploys overlap), then launches this Job. It runs IN THE CLUSTER, so the runner is free
+# the instant the manifests are applied.
 #
-# The Job watches the new rollout. Kubernetes' RollingUpdate already protects availability — a new image
-# that fails readiness never displaces the healthy old pods — so this Job's job is to turn a *silent*
-# stuck rollout into a loud, reverted one:
+# RollingUpdate already protects availability — a new image that fails readiness never displaces the
+# healthy old pods — so this Job's job is to turn a *silent* stuck rollout into a loud, reverted one:
 #   * rollout succeeds  → exit 0 (the ttl cleans the Job up).
-#   * rollout fails     → `helm rollback` the release to the last good revision (keeps Helm state and the
-#                         cluster in sync, unlike `kubectl rollout undo`), ping Discord, exit 1.
+#   * rollout fails     → `helm rollback` to the last good revision (keeps Helm state and the cluster in
+#                         sync, unlike `kubectl rollout undo`), ping Discord, exit 1.
 #
-# Runs as the `deployer` ServiceAccount (already granted deployments watch/patch + the release Secrets),
-# hardened like every other workload. alpine/k8s carries kubectl + helm + curl in one small image.
+# Runs as the `deployer` ServiceAccount (granted deployments watch/patch + the release Secrets), hardened
+# like every other workload. alpine/k8s carries kubectl + helm + curl in one small image.
 #
-# deploy.sh fills ${COMPONENT} / ${IMAGE} / ${PREVIOUS} / ${K8S_IMAGE} / ${ROLLOUT_TIMEOUT} by sed, and
-# ONLY those five. $WEBHOOK below is deliberately NOT one of them: it is read at runtime, in the pod,
-# from the secret — a blanket substitution would blank it and silently disable the alert.
+# deploy.sh fills ${COMPONENT} / ${IMAGE} / ${PREVIOUS} / ${K8S_IMAGE} / ${ROLLOUT_TIMEOUT} by sed, ONLY
+# those five. $WEBHOOK is deliberately NOT one: it is read at runtime, in the pod, from the secret — a
+# blanket substitution would blank it and silently disable the alert.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -69,12 +68,11 @@ spec:
                 exit 0
               fi
               echo "rollout FAILED for ${COMPONENT} (${IMAGE}) — rolling back the release" >&2
-              # --force-conflicts for the same reason deploy.sh's upgrade has it: if any other field
-              # manager owns .image (a hand-run `kubectl set image` hotfix), a plain rollback dies on the
-              # server-side-apply conflict and drops to the `rollout undo` below — which fixes the cluster
-              # but leaves the RELEASE still describing the broken version. That divergence is the exact
-              # thing rolling back via helm is meant to prevent, and it would surface later as a deploy
-              # that "succeeds" while reverting itself. Verified: the conflict is real, and this clears it.
+              # --force-conflicts, same reason deploy.sh's upgrade has it: if another field manager owns
+              # .image (a hand-run `kubectl set image` hotfix), a plain rollback dies on the SSA conflict
+              # and drops to the `rollout undo` below — which fixes the cluster but leaves the RELEASE
+              # still describing the broken version. That divergence is exactly what rolling back via helm
+              # prevents; it would surface later as a deploy that "succeeds" while reverting itself.
               helm rollback "${COMPONENT}" -n platform --force-conflicts \
                 || kubectl -n platform rollout undo "deploy/${COMPONENT}" || true
               if [ -n "${WEBHOOK:-}" ]; then

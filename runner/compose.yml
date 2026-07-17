@@ -1,11 +1,11 @@
 # The runner, as a guest on minikube's docker network.
 #
-# It is a GUEST: minikube created that network and owns the node container on it. Compose must not try
-# to define the node — `minikube start` builds it with a privileged/cgroup/tmpfs/port contract its
-# bootstrapper depends on, and a container compose made would not be recognised as minikube's own.
-# Declaring the network `external` is how we join without pretending to own it.
+# minikube created that network and owns the node container. Compose must not define the node —
+# `minikube start` builds it with a privileged/cgroup/tmpfs/port contract its bootstrapper depends on,
+# and a container compose made would not be recognised as minikube's own. Declaring the network
+# `external` joins without pretending to own it.
 #
-# Being on that network is what makes the runner useful: from here, and only from here, it can reach
+# Being on that network is what makes the runner useful: from here, and only here, it reaches
 #   registry:5000        — the image registry, which has no inbound port
 #   192.168.49.2:8443    — the apiserver at its NATIVE address, unroutable from the host
 services:
@@ -13,28 +13,25 @@ services:
     build: .
     image: platform-runner:latest
     container_name: platform-runner
-    # --ephemeral means run.sh exits after one job. This is what brings it straight back — without it
-    # the runner would take exactly one job in its life and then silently stop consuming the queue,
-    # and the jobs would pile up until GitHub timed them out.
+    # --ephemeral means run.sh exits after one job. restart: always brings it straight back — without
+    # it the runner would take one job and then silently stop consuming the queue.
     restart: always
     env_file: [.env]
     volumes:
-      # The docker daemon it builds with. This is root-equivalent on the VM, and it is the reason the
-      # colima mount was narrowed: a job here can `docker run -v` any path the VM can see, and the VM
-      # can now see exactly one directory containing three certificate files.
+      # The docker daemon it builds with — root-equivalent on the VM, and the reason the colima mount
+      # was narrowed: a job here can `docker run -v` any path the VM can see, and the VM sees exactly one
+      # directory (three certificate files).
       - /var/run/docker.sock:/var/run/docker.sock
-      # The registry's CA, so deploy.sh's curl can verify the registry before deploying a tag that
-      # might not be there. `docker push` does NOT need this — that runs in colima's daemon, which
-      # already trusts the CA (platform-orchestration's k8s/registry.sh installs it).
-      #
-      # This is the ONE host path the VM can see, so mounting it costs no new exposure: a job on this
-      # runner could reach it anyway. Read-only, and the CA PRIVATE key is deliberately not in there.
+      # The registry's CA, so deploy.sh's curl can verify the registry. `docker push` does NOT need this
+      # — it runs in colima's daemon, which already trusts the CA (k8s/registry.sh installs it). This is
+      # the ONE host path the VM can see, so mounting it costs no new exposure. Read-only; the CA PRIVATE
+      # key is deliberately not in there.
       - ${PLATFORM_VM_DIR:-/home/ClaudeSpace/git-workspace/claude-workspace/.platform-vm}/certs:/certs:ro
-    # Pinned, because .2 is minikube's and this container races it for the lease. `restart: always`
-    # brings the runner up at boot before `minikube start` runs, and docker's IPAM hands out .2 — the
-    # apiserver's address, the one thing the runner is on this network to reach — to whoever asks
-    # first. Minikube then cannot claim its own IP and refuses to start, taking the cluster with it.
-    # Any address outside minikube's is fine; .20 keeps clear of the registry at .10.
+    # Pinned, because .2 is minikube's and this container races it for the lease. restart: always brings
+    # the runner up at boot BEFORE `minikube start`, and docker's IPAM hands .2 (the apiserver address,
+    # the one thing the runner is here to reach) to whoever asks first — then minikube cannot claim its
+    # own IP and refuses to start, taking the cluster with it. Any address outside minikube's is fine;
+    # .20 keeps clear of the registry at .10.
     networks:
       minikube:
         ipv4_address: 192.168.49.20

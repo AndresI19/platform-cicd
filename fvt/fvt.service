@@ -1,20 +1,18 @@
 # Brings the FVT traffic runner up at boot.
 #
-# The runner is a docker compose service, and `docker compose up` is a thing someone has to run.
-# Without this unit, every reboot leaves the platform with no demo traffic and the dashboard's Recent
-# Calls empty until someone logs in and starts it by hand — the same silent-after-reboot failure the
-# other host units (colima.service, platform.service, runner.service) exist to prevent.
+# The runner is a docker compose service someone has to `up`. Without this unit, every reboot leaves the
+# dashboard's Recent Calls empty until someone starts it by hand — the same silent-after-reboot failure
+# the other host units prevent.
 #
 # A *user* unit, like the others, because the docker socket and this compose project belong to this
-# user. Under `loginctl enable-linger` a user unit starts at boot with no login session — WITHOUT
-# LINGER THIS UNIT WILL NOT RUN AT BOOT, exactly like the other three.
+# user. Under `loginctl enable-linger` a user unit starts at boot with no login session — WITHOUT LINGER
+# THIS UNIT WILL NOT RUN AT BOOT.
 [Unit]
 Description=platform FVT traffic runner
-# Requires= colima for the docker daemon: with the VM down there is no daemon for `docker compose`.
-# After=/Wants= platform.service because the image is PULLED from registry:5000, which platform boot
-# starts — Wants, not Requires, so a slow platform just means Restart=on-failure retries until the
-# registry answers rather than failing permanently on a start-order race. Note it does NOT need the
-# minikube network: the runner talks to the PUBLIC API, and only the image pull touches the registry.
+# Requires= colima for the docker daemon. After=/Wants= platform.service because the image is PULLED
+# from registry:5000, which platform boot starts — Wants, not Requires, so a slow platform just makes
+# Restart=on-failure retry rather than failing on a start-order race. It does NOT need the minikube
+# network: the runner talks to the PUBLIC API, and only the image pull touches the registry.
 After=colima.service platform.service network-online.target
 Requires=colima.service
 Wants=platform.service network-online.target
