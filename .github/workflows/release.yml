@@ -1,24 +1,19 @@
 # The platform's only deploy path.
 #
-# It is triggered by repository_dispatch, and that is not ceremony — it is forced, and it is also what
-# makes the whole thing safe:
+# Triggered by repository_dispatch, which is forced, and is what makes it safe:
 #
-#   * A self-hosted runner can only be scoped to ONE REPOSITORY. Org-level runners (and runner groups)
-#     are an organization feature, and AndresI19 is a personal account. So five app repos cannot share
-#     one runner — and a reusable workflow would not help, because its jobs run in the CALLING repo's
-#     context and would need a runner registered there.
-#   * Therefore the runner lives here, and here only. No app repo can reach it at all — not by label,
-#     not by a crafted workflow, not from a fork. It does not exist in their world.
-#   * And because there is exactly ONE runner, every deploy is serialized for free: the runner takes
-#     one job at a time off GitHub's job-assignment queue. A concurrency group is the WRONG way to get
-#     that (it CANCELS excess pending jobs) and is deliberately absent.
+#   * A self-hosted runner can only be scoped to ONE REPOSITORY. Runner groups are an org feature and
+#     AndresI19 is a personal account, so the app repos cannot share one runner — and a reusable
+#     workflow would not help, its jobs run in the CALLING repo's context and would need a runner there.
+#   * So the runner lives here, and here only. No app repo can reach it — not by label, not by a crafted
+#     workflow, not from a fork.
+#   * And with exactly ONE runner, every deploy is serialized for free off GitHub's job-assignment
+#     queue. A concurrency group is the WRONG way to get that (it CANCELS excess pending jobs) and is
+#     deliberately absent.
 #
-# ONE dispatch per repo-release, carrying that repo's whole component list. A repo that ships several
-# components (project-platform → home + platform-auth; rs-mcp-server → rs-mcp-server + fvt-traffic)
-# handles them together in this one job and reports them in ONE Discord message — rather than a
-# separate ping per component for what is really a single release at a single tag. Most components are
-# built AND helm-deployed; fvt-traffic is the exception — it is built and pushed but runs on the host
-# (fvt/), not in the cluster, so its deploy step is skipped (see the build-and-deploy loop below).
+# ONE dispatch per repo-release, carrying that repo's whole component list, reported in ONE Discord
+# message. Most components are built AND helm-deployed; fvt-traffic is the exception — built and pushed
+# but runs on the host (fvt/), so its deploy step is skipped (see the build-and-deploy loop below).
 name: release
 
 on:
@@ -32,9 +27,8 @@ jobs:
       - name: The deploy scripts
         uses: actions/checkout@v4
 
-      # The source, at the exact tag the app repo just cut. All the repo's components build from this
-      # one checkout — they share the repo and the tag, which is the whole reason they share a message.
-      # Checking out by TAG (not SHA) is deliberate: the tag IS the version.
+      # The source, at the exact tag the app repo just cut. All the repo's components build from this one
+      # checkout. By TAG (not SHA) deliberately: the tag IS the version.
       - name: ${{ github.event.client_payload.repo }} @ ${{ github.event.client_payload.version }}
         uses: actions/checkout@v4
         with:
@@ -43,14 +37,12 @@ jobs:
           path: src
           submodules: recursive # the quiz vendors @platform/ui as a submodule; without it, npm ci fails
 
-      # The chart. The deploy is `helm upgrade` now (the platform migrated off kustomize), and helm
-      # needs the chart source to render the release — deploy.sh reads the GENERIC service chart from
-      # ./orchestration/charts/service. It is generic on purpose: it carries no per-service values at
-      # all, and each component's Deployment/Service spec comes from its OWN repo (src/deploy/*.yaml),
-      # checked out above. Orchestration owns the shared shape; the app repos own their resources.
-      # `main`, not a tag: the chart's templates are stable and version-independent of the app images —
-      # only the image tags, passed as --set values, change per release. platform-orchestration is
-      # public, so the default GITHUB_TOKEN checks it out with no extra credential.
+      # The chart. deploy.sh renders the release from the GENERIC service chart at
+      # ./orchestration/charts/service — it carries no per-service values; each component's
+      # Deployment/Service spec comes from its OWN repo (src/deploy/*.yaml), checked out above.
+      # Orchestration owns the shared shape, the app repos own their resources. `main`, not a tag: the
+      # templates are version-independent of the app images — only the image tags (--set values) change
+      # per release. platform-orchestration is public, so the default GITHUB_TOKEN suffices.
       - name: The chart — platform-orchestration@main
         uses: actions/checkout@v4
         with:
@@ -58,9 +50,9 @@ jobs:
           ref: main
           path: orchestration
 
-      # Build + deploy every component in the release, attempting all of them even if one fails, and
-      # recording a per-component result the report step reads. NOT `set -e`: one component's failure
-      # must not skip the others or the report.
+      # Build + deploy every component, attempting all even if one fails, recording a per-component
+      # result the report step reads. NOT `set -e`: one component's failure must not skip the others or
+      # the report.
       - name: Build and deploy
         run: |
           set -uo pipefail
@@ -71,22 +63,20 @@ jobs:
           for c in $COMPONENTS; do
             echo "::group::${c} ${V}"
             prev="$(kubectl -n platform get deploy "$c" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
-            # Record a per-component line: `component|status|detail`. On success detail is the image; on
-            # failure it is WHY, so the report can chart every component's fate — the failed ones say
-            # what happened (build failed / not applied) rather than a bare mark.
+            # Record a per-component line `component|status|detail`: on success detail is the image, on
+            # failure it is WHY (build failed / not applied), so the report charts every component's fate.
             #
-            # A deploy is ASYNCHRONOUS now (deploy/deploy.sh applies, an in-cluster Job watches). So a
-            # failure here means the deploy never STARTED — the manifests were rejected, or the image
-            # was not in the registry — and nothing changed: prev is still serving. A rollout that
-            # starts and then stalls cannot be reported from this job at all, because the runner is long
-            # gone by then; the Job posts that to Discord itself. Hence "deploying", not "deployed".
+            # A deploy is ASYNCHRONOUS now (deploy.sh applies, an in-cluster Job watches). A failure here
+            # means the deploy never STARTED (manifests rejected, or image not in the registry) and
+            # nothing changed — prev is still serving. A rollout that starts and then stalls cannot be
+            # reported from this job (the runner is long gone); the Job posts that to Discord itself.
+            # Hence "deploying", not "deployed".
             if ! ./deploy/build.sh "$c" "$V" src; then
               echo "${c}|fail|build failed" >> "$RESULTS"; overall=1
             elif [ "$c" = fvt-traffic ]; then
-              # fvt-traffic is NOT a cluster workload — it runs on the host (fvt/compose.yml), driving
-              # the public API. CI still builds and pushes its image so the host can pull the newest
-              # :latest, but there is nothing in the chart to helm-deploy, so the deploy step is
-              # skipped. Refresh the host with `systemctl --user restart fvt` after a release.
+              # fvt-traffic is NOT a cluster workload — it runs on the host (fvt/compose.yml). CI builds
+              # and pushes its image so the host can pull the newest :latest, but nothing in the chart
+              # helm-deploys it. Refresh the host with `systemctl --user restart fvt`.
               echo "${c}|ok|registry:5000/${c}:${V} (host runner — image built; restart fvt to adopt)" >> "$RESULTS"
             elif ! ./deploy/deploy.sh "$c" "$V"; then
               echo "${c}|fail|not applied — ${prev} still running" >> "$RESULTS"; overall=1
@@ -109,9 +99,9 @@ jobs:
           REPO: ${{ github.event.client_payload.repo }}
           COMPONENTS: ${{ github.event.client_payload.components || github.event.client_payload.component }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # Provenance, gathered by the app repo's release.yml (which alone has the merge context) and
-          # passed in the dispatch. All optional: a direct/manual dispatch carries none, and the message
-          # simply omits the PR footer and link. Never interpolated into a command — read as env only.
+          # Provenance, gathered by the app repo's release.yml (which alone has the merge context). All
+          # optional: a direct/manual dispatch carries none and the message omits the PR footer/link.
+          # Never interpolated into a command — read as env only.
           PR: ${{ github.event.client_payload.pr }}
           PR_URL: ${{ github.event.client_payload.pr_url }}
           AUTHOR: ${{ github.event.client_payload.author }}
@@ -123,12 +113,9 @@ jobs:
           if [ "${{ job.status }}" = "success" ]; then EMOJI="✅"; COLOR=3066993; else EMOJI="❌"; COLOR=15548997; fi
 
           # One line per component, from the results file. If it is missing (a failure before the loop,
-          # e.g. checkout), fall back to marking the whole component list failed so the message still
-          # says something true.
-          # Same shape as the success message, which is the point: title carries the service + version,
-          # and each component charts on its own line. A success line ends in `→ \`image\``; a failure
-          # line ends in `— <what happened>`. So a mixed release (one up, one rolled back) reads as one
-          # coherent chart rather than a generic "FAILED".
+          # e.g. checkout), fall back to marking the whole list failed so the message still says
+          # something true. A success line ends `→ \`image\``, a failure line ends `— <what happened>`,
+          # so a mixed release reads as one coherent chart, not a bare "FAILED".
           body=""
           summary="## ${EMOJI} ${REPO##*/} \`${V}\`"$'\n\n'"| component | result |"$'\n'"|---|---|"$'\n'
           if [ -f "$RESULTS" ]; then
@@ -150,9 +137,8 @@ jobs:
           fi
 
           # Provenance footer: "PR #23 by author · merged by X · branch". Every part is conditional —
-          # the merger only appears when it differs from the author (the common case is they are the
-          # same person, and repeating it is noise), and the whole footer is empty for a dispatch that
-          # carried no PR (a manual/direct one), so those messages look exactly as before.
+          # the merger appears only when it differs from the author, and the whole footer is empty for a
+          # dispatch that carried no PR (a manual/direct one).
           foot=""
           if [ -n "${PR:-}" ]; then
             foot="PR #${PR}"
@@ -164,11 +150,11 @@ jobs:
           echo "$summary" >> "$GITHUB_STEP_SUMMARY"
 
           [ -n "$WEBHOOK" ] || exit 0
-          # Description on properly-indented lines using bash $'\n' — a line less-indented than this
+          # Build multi-line strings with bash $'\n' on indented lines — a line less-indented than this
           # run: block would terminate the YAML block scalar and make the workflow unparseable.
           desc="${body}"$'\n'"<${RUN_URL}>"
-          # The embed is assembled with jq so the PR link (clickable title) and footer are added only
-          # when present — an object merge with {} when absent leaves the base embed untouched.
+          # jq assembles the embed so the PR link and footer are added only when present — a {} merge
+          # when absent leaves the base embed untouched.
           jq -n --arg t "${EMOJI} release — ${REPO##*/} ${V}" --arg d "$desc" --argjson c "$COLOR" \
             --arg url "${PR_URL:-}" --arg foot "$foot" \
             '{username:"platform-cicd",

@@ -1,8 +1,8 @@
 # platform-cicd
 
-The platform's deploy path: a single self-hosted GitHub Actions runner and the scripts it runs. A
-merge to any app repo's `main` builds that component on this machine, pushes it to the local TLS
-registry, and rolls it out as a Helm release — reported to Discord, with no inbound port.
+The platform's deploy path: a single self-hosted GitHub Actions runner and the scripts it runs. A merge
+to any app repo's `main` builds that component on this machine, pushes it to the local TLS registry, and
+rolls it out as a Helm release — reported to Discord, with no inbound port.
 
 ## The pieces
 
@@ -11,7 +11,7 @@ registry, and rolls it out as a Helm release — reported to Discord, with no in
 | `.github/workflows/release.yml` | the deploy job — triggered by `repository_dispatch`, one per component |
 | `runner/Dockerfile` · `compose.yml` · `entrypoint.sh` | the self-hosted runner: ephemeral, buildx, on minikube's docker network |
 | `runner/runner.service` | systemd **user** unit that starts the runner at boot |
-| `fvt/compose.yml` · `fvt.service` | the FVT traffic runner: a host container that drives the **public** API on a loop (was a cluster Pod) |
+| `fvt/compose.yml` · `fvt.service` | the FVT traffic runner: a host container driving the **public** API on a loop (was a cluster Pod) |
 | `deploy/build.sh` | build one component's image (a per-component registry of build contexts) and push it |
 | `deploy/deploy.sh` | `helm upgrade` the component's **own** release, verify the spec, hand the rollout to the cluster — applied, not awaited |
 | `deploy/rollout-check.yaml` | the Job that watches that rollout in-cluster and rolls the release back (+ Discord) if it stalls |
@@ -39,16 +39,16 @@ sudo loginctl enable-linger "$USER"    # WITHOUT THIS, no user unit starts at bo
 ```
 
 Verify: `systemctl --user is-enabled runner` → `enabled`, `loginctl show-user "$USER" -p Linger` →
-`Linger=yes`. A job waits in GitHub's queue until a runner takes it, so a runner that is down at boot
-delays deploys rather than losing them.
+`Linger=yes`. A job waits in GitHub's queue until a runner takes it, so a runner down at boot delays
+deploys rather than losing them.
 
 ### The FVT traffic runner
 
-A second host service, `fvt/`, replays the function-verification suite through the gateway on a loop
-so the dashboard's Recent Calls stay populated. It used to be an in-cluster `fvt-traffic` Deployment;
-it now runs on the host and hits the **public** API, signing in to platform-auth for a real token
-(vMCP verifies signatures, so the old forged bearer no longer works). CI still builds and pushes its
-image — the release job just skips the helm-deploy for it.
+A second host service, `fvt/`, replays the function-verification suite through the gateway on a loop so
+the dashboard's Recent Calls stay populated. It used to be an in-cluster `fvt-traffic` Deployment; it
+now runs on the host and hits the **public** API, signing in to platform-auth for a real token (vMCP
+verifies signatures, so the old forged bearer no longer works). CI still builds and pushes its image —
+the release job just skips the helm-deploy.
 
 ```bash
 cp fvt/.env.example fvt/.env           # set FVT_CODE (the fvt-runner pin, ≥4 chars) — see the file
@@ -61,7 +61,7 @@ systemctl --user enable --now fvt.service      # linger (above) covers this unit
 ```
 
 After an rs-mcp-server release rebuilds the image, adopt it with `systemctl --user restart fvt` — the
-unit runs `up --pull always`, so it pulls the newest `:latest` and recreates the container.
+unit runs `up --pull always`, pulling the newest `:latest` and recreating the container.
 
 **Full documentation** → the [docs](docs/): [Architecture](docs/architecture.md) ·
 [Runner](docs/runner.md) · [Deploy pipeline](docs/deploy-pipeline.md) · [Security](docs/security.md) ·
