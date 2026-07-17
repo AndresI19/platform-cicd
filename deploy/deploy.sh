@@ -28,7 +28,7 @@ set -Eeuo pipefail
 COMPONENT="${1:?usage: deploy.sh <component> <version> [src]}"
 VERSION="${2:?usage: deploy.sh <component> <version> [src]}"
 SRC="${3:-src}"
-NS=platform
+NAMESPACE=platform
 # The release IS the component now — which is also why rollout-check.yaml can `helm rollback ${COMPONENT}`.
 RELEASE="$COMPONENT"
 # The generic service chart, checked out by release.yml from platform-orchestration@main. It carries no
@@ -82,7 +82,7 @@ helm dependency build "$CHART" >/dev/null 2>&1 \
 
 # --- 4. remember what we are replacing ----------------------------------------------------------
 # So the check Job's failure message can NAME what it reverted to.
-PREVIOUS="$(kubectl -n "$NS" get deploy "$COMPONENT" \
+PREVIOUS="$(kubectl -n "$NAMESPACE" get deploy "$COMPONENT" \
   -o jsonpath="$RUNNING_IMAGE_PATH" 2>/dev/null || echo '?')"
 say "currently running ${PREVIOUS}"
 
@@ -95,7 +95,7 @@ say "currently running ${PREVIOUS}"
 #   must never make the next deploy fail.
 # No --wait: step 6 launches the watcher. No --reuse-values: see the header.
 echo "==> helm upgrade ${RELEASE}: ${COMPONENT} → ${VERSION}"
-if ! helm upgrade --install "$RELEASE" "$CHART" -n "$NS" -f "$VALUES" \
+if ! helm upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$VALUES" \
       --set "image.repo=${REGISTRY}/${COMPONENT}" \
       --set "image.tag=${VERSION}" \
       --set "version=${VERSION}" \
@@ -109,7 +109,7 @@ say "applied"
 # Read the spec back rather than trusting the command that set it — every silent failure this platform
 # has had was a step that reported success without being checked. This asserts what helm just wrote; it
 # says nothing about readiness, which is deliberately the Job's job.
-LIVE="$(kubectl -n "$NS" get deploy "$COMPONENT" \
+LIVE="$(kubectl -n "$NAMESPACE" get deploy "$COMPONENT" \
   -o jsonpath="$RUNNING_IMAGE_PATH")"
 [ "$LIVE" = "$IMAGE" ] || { echo "FATAL: expected ${IMAGE}, cluster says ${LIVE}" >&2; exit 1; }
 
@@ -127,7 +127,7 @@ sed -e "s|\${COMPONENT}|${COMPONENT}|g" \
     -e "s|\${K8S_IMAGE}|${K8S_IMAGE}|g" \
     -e "s|\${ROLLOUT_TIMEOUT}|${ROLLOUT_TIMEOUT}|g" \
     deploy/rollout-check.yaml \
-  | kubectl -n "$NS" replace --force -f - >/dev/null
+  | kubectl -n "$NAMESPACE" replace --force -f - >/dev/null
 say "watching in-cluster; runner is free"
 
 # Surface what happened, so the workflow can report it without re-deriving it. GITHUB_OUTPUT is only
