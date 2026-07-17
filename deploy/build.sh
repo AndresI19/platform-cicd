@@ -16,7 +16,11 @@ COMPONENT="${1:?usage: build.sh <component> <version> <source-dir>}"
 VERSION="${2:?}"
 SRC="${3:?}"   # the app repo, checked out at the tag. May hold ONE component or several.
 
-IMAGE="registry:5000/${COMPONENT}:${VERSION}"
+# The in-cluster registry every image is pushed to and deploy.sh pulls from. Overridable for a
+# hand-run against an alternate registry; the default is the only one CI ever uses.
+REGISTRY="${REGISTRY:-registry:5000}"
+IMAGE="${REGISTRY}/${COMPONENT}:${VERSION}"
+LATEST="${REGISTRY}/${COMPONENT}:latest"   # the human pointer tag, retagged and pushed below
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_SHA="$(git -C "$SRC" rev-parse --short HEAD)"
 
@@ -54,9 +58,9 @@ docker build -t "$IMAGE" "${args[@]}" "${EXTRA[@]}" "$CTX"
 # :latest is a POINTER FOR HUMANS. Nothing deploys it — a mutable tag is the exact bug this deploy was
 # rewritten to kill (`:latest` + IfNotPresent → kubelet never looks for a newer image, Pod spec never
 # changes, `apply` sees nothing to do).
-docker tag "$IMAGE" "registry:5000/${COMPONENT}:latest"
+docker tag "$IMAGE" "$LATEST"
 
 echo "==> Pushing"
 docker push -q "$IMAGE"
-docker push -q "registry:5000/${COMPONENT}:latest"
+docker push -q "$LATEST"
 echo "    ${IMAGE}"
