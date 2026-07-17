@@ -37,7 +37,12 @@ CHART="${CHART:-orchestration/charts/service}"
 # The component's Deployment/Service spec, owned by the repo that ships it — the half of the split that
 # moved OUT of orchestration.
 VALUES="${VALUES:-${SRC}/deploy/${COMPONENT}.values.yaml}"
-IMAGE="registry:5000/${COMPONENT}:${VERSION}"
+# The in-cluster registry build.sh pushed to. Overridable for a hand-run, like CHART/VALUES above.
+REGISTRY="${REGISTRY:-registry:5000}"
+IMAGE="${REGISTRY}/${COMPONENT}:${VERSION}"
+# The running-image field on a Deployment — read twice below (before and after the upgrade), so the
+# jsonpath is written once here.
+RUNNING_IMAGE_PATH='{.spec.template.spec.containers[0].image}'
 # kubectl + helm in one small image for the check Job. Pinned to the cluster's own minor — `kubectl
 # rollout status` is that Job's whole point, and version skew is not a thing to discover there.
 K8S_IMAGE="${K8S_IMAGE:-alpine/k8s:1.35.1}"
@@ -52,7 +57,7 @@ say() { echo "    $*"; }
 # Accept media type and a registry answers 404 (not 406) for a type it lacks — docker 28 pushes OCI, so
 # asking for schema2 reads a present image as missing. The tags list has no such ambiguity.
 echo "==> Verifying ${IMAGE} exists"
-curl -fsS --cacert /certs/ca.crt "https://registry:5000/v2/${COMPONENT}/tags/list" \
+curl -fsS --cacert /certs/ca.crt "https://${REGISTRY}/v2/${COMPONENT}/tags/list" \
   | grep -q "\"${VERSION}\"" \
   || { echo "FATAL: ${IMAGE} is not in the registry — nothing was deployed" >&2; exit 1; }
 say "present"
@@ -78,7 +83,7 @@ helm dependency build "$CHART" >/dev/null 2>&1 \
 # --- 4. remember what we are replacing ----------------------------------------------------------
 # So the check Job's failure message can NAME what it reverted to.
 PREVIOUS="$(kubectl -n "$NS" get deploy "$COMPONENT" \
-  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
+  -o jsonpath="$RUNNING_IMAGE_PATH" 2>/dev/null || echo '?')"
 say "currently running ${PREVIOUS}"
 
 # --- 5. the deploy ------------------------------------------------------------------------------
@@ -91,7 +96,7 @@ say "currently running ${PREVIOUS}"
 # No --wait: step 6 launches the watcher. No --reuse-values: see the header.
 echo "==> helm upgrade ${RELEASE}: ${COMPONENT} → ${VERSION}"
 if ! helm upgrade --install "$RELEASE" "$CHART" -n "$NS" -f "$VALUES" \
-      --set "image.repo=registry:5000/${COMPONENT}" \
+      --set "image.repo=${REGISTRY}/${COMPONENT}" \
       --set "image.tag=${VERSION}" \
       --set "version=${VERSION}" \
       --take-ownership --force-conflicts; then
@@ -105,7 +110,7 @@ say "applied"
 # has had was a step that reported success without being checked. This asserts what helm just wrote; it
 # says nothing about readiness, which is deliberately the Job's job.
 LIVE="$(kubectl -n "$NS" get deploy "$COMPONENT" \
-  -o jsonpath='{.spec.template.spec.containers[0].image}')"
+  -o jsonpath="$RUNNING_IMAGE_PATH")"
 [ "$LIVE" = "$IMAGE" ] || { echo "FATAL: expected ${IMAGE}, cluster says ${LIVE}" >&2; exit 1; }
 
 # sed, not envsubst: the runner image has no gettext-base, and runner.service brings the container up
