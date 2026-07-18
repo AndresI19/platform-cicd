@@ -28,7 +28,7 @@ set -Eeuo pipefail
 COMPONENT="${1:?usage: deploy.sh <component> <version> [src]}"
 VERSION="${2:?usage: deploy.sh <component> <version> [src]}"
 SRC="${3:-src}"
-NS=platform
+NAMESPACE=platform
 # The release IS the component now — which is also why rollout-check.yaml can `helm rollback ${COMPONENT}`.
 RELEASE="$COMPONENT"
 # The generic service chart, checked out by release.yml from platform-orchestration@main. It carries no
@@ -50,6 +50,9 @@ K8S_IMAGE="${K8S_IMAGE:-alpine/k8s:1.35.1}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-5m}"
 
 say() { echo "    $*"; }
+# The failing counterpart to say(): print a FATAL diagnostic (one line per argument) to stderr and stop.
+# Every guard below dies the same way — this folds the repeated `... >&2; exit 1` tail into one name.
+die() { printf '%s\n' "$@" >&2; exit 1; }
 
 # --- 1. refuse to deploy an image that is not really there --------------------------------------
 # A bad tag would sit in ImagePullBackOff and surface as a rollout-check failure minutes later rather
@@ -59,17 +62,15 @@ say() { echo "    $*"; }
 echo "==> Verifying ${IMAGE} exists"
 curl -fsS --cacert /certs/ca.crt "https://${REGISTRY}/v2/${COMPONENT}/tags/list" \
   | grep -q "\"${VERSION}\"" \
-  || { echo "FATAL: ${IMAGE} is not in the registry — nothing was deployed" >&2; exit 1; }
+  || die "FATAL: ${IMAGE} is not in the registry — nothing was deployed"
 say "present"
 
 # --- 2. refuse to deploy a component that ships no values ---------------------------------------
 # Without this the helm upgrade would "succeed" against the chart's bare defaults (no real service) and
 # deploy a component-shaped nothing. A repo that adds a component and forgets its values file is told so.
-[ -f "$VALUES" ] || {
-  echo "FATAL: ${COMPONENT} has no deploy values at ${VALUES} — nothing was deployed" >&2
-  echo "       the repo that ships ${COMPONENT} must commit that file (see platform-orchestration/charts/service)" >&2
-  exit 1
-}
+[ -f "$VALUES" ] || die \
+  "FATAL: ${COMPONENT} has no deploy values at ${VALUES} — nothing was deployed" \
+  "       the repo that ships ${COMPONENT} must commit that file (see platform-orchestration/charts/service)"
 say "values: ${VALUES}"
 
 # --- 3. vendor the library subchart ---------------------------------------------------------------
@@ -78,11 +79,11 @@ say "values: ${VALUES}"
 # until this runs; without it every deploy dies on "found in Chart.yaml, but missing in charts/
 # directory". It resolves from the adjacent path — no network, no repo to add.
 helm dependency build "$CHART" >/dev/null 2>&1 \
-  || { echo "FATAL: could not vendor ${CHART}'s platform-lib dependency" >&2; exit 1; }
+  || die "FATAL: could not vendor ${CHART}'s platform-lib dependency"
 
 # --- 4. remember what we are replacing ----------------------------------------------------------
 # So the check Job's failure message can NAME what it reverted to.
-PREVIOUS="$(kubectl -n "$NS" get deploy "$COMPONENT" \
+PREVIOUS="$(kubectl -n "$NAMESPACE" get deploy "$COMPONENT" \
   -o jsonpath="$RUNNING_IMAGE_PATH" 2>/dev/null || echo '?')"
 say "currently running ${PREVIOUS}"
 
@@ -95,13 +96,12 @@ say "currently running ${PREVIOUS}"
 #   must never make the next deploy fail.
 # No --wait: step 6 launches the watcher. No --reuse-values: see the header.
 echo "==> helm upgrade ${RELEASE}: ${COMPONENT} → ${VERSION}"
-if ! helm upgrade --install "$RELEASE" "$CHART" -n "$NS" -f "$VALUES" \
+if ! helm upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$VALUES" \
       --set "image.repo=${REGISTRY}/${COMPONENT}" \
       --set "image.tag=${VERSION}" \
       --set "version=${VERSION}" \
       --take-ownership --force-conflicts; then
-  echo "FATAL: ${COMPONENT} ${VERSION} was not applied; ${PREVIOUS} is still running" >&2
-  exit 1
+  die "FATAL: ${COMPONENT} ${VERSION} was not applied; ${PREVIOUS} is still running"
 fi
 say "applied"
 
@@ -109,9 +109,9 @@ say "applied"
 # Read the spec back rather than trusting the command that set it — every silent failure this platform
 # has had was a step that reported success without being checked. This asserts what helm just wrote; it
 # says nothing about readiness, which is deliberately the Job's job.
-LIVE="$(kubectl -n "$NS" get deploy "$COMPONENT" \
+LIVE="$(kubectl -n "$NAMESPACE" get deploy "$COMPONENT" \
   -o jsonpath="$RUNNING_IMAGE_PATH")"
-[ "$LIVE" = "$IMAGE" ] || { echo "FATAL: expected ${IMAGE}, cluster says ${LIVE}" >&2; exit 1; }
+[ "$LIVE" = "$IMAGE" ] || die "FATAL: expected ${IMAGE}, cluster says ${LIVE}"
 
 # sed, not envsubst: the runner image has no gettext-base, and runner.service brings the container up
 # with `compose up -d` (never --build), so a script that needed a new package would fail every release
@@ -127,7 +127,7 @@ sed -e "s|\${COMPONENT}|${COMPONENT}|g" \
     -e "s|\${K8S_IMAGE}|${K8S_IMAGE}|g" \
     -e "s|\${ROLLOUT_TIMEOUT}|${ROLLOUT_TIMEOUT}|g" \
     deploy/rollout-check.yaml \
-  | kubectl -n "$NS" replace --force -f - >/dev/null
+  | kubectl -n "$NAMESPACE" replace --force -f - >/dev/null
 say "watching in-cluster; runner is free"
 
 # Surface what happened, so the workflow can report it without re-deriving it. GITHUB_OUTPUT is only

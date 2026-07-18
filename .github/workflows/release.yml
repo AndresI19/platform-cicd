@@ -57,11 +57,14 @@ jobs:
         run: |
           set -uo pipefail
           COMPONENTS="${{ github.event.client_payload.components || github.event.client_payload.component }}"
-          V="${{ github.event.client_payload.version }}"
+          VERSION="${{ github.event.client_payload.version }}"
+          # The in-cluster registry build.sh/deploy.sh push to — named once here so the two result
+          # lines below report the same image string those scripts derive from their REGISTRY default.
+          REGISTRY=registry:5000
           RESULTS="${RUNNER_TEMP}/results.txt"; : > "$RESULTS"
           overall=0
           for c in $COMPONENTS; do
-            echo "::group::${c} ${V}"
+            echo "::group::${c} ${VERSION}"
             prev="$(kubectl -n platform get deploy "$c" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '?')"
             # Record a per-component line `component|status|detail`: on success detail is the image, on
             # failure it is WHY (build failed / not applied), so the report charts every component's fate.
@@ -71,17 +74,17 @@ jobs:
             # nothing changed — prev is still serving. A rollout that starts and then stalls cannot be
             # reported from this job (the runner is long gone); the Job posts that to Discord itself.
             # Hence "deploying", not "deployed".
-            if ! ./deploy/build.sh "$c" "$V" src; then
+            if ! ./deploy/build.sh "$c" "$VERSION" src; then
               echo "${c}|fail|build failed" >> "$RESULTS"; overall=1
             elif [ "$c" = fvt-traffic ]; then
               # fvt-traffic is NOT a cluster workload — it runs on the host (fvt/compose.yml). CI builds
               # and pushes its image so the host can pull the newest :latest, but nothing in the chart
               # helm-deploys it. Refresh the host with `systemctl --user restart fvt`.
-              echo "${c}|ok|registry:5000/${c}:${V} (host runner — image built; restart fvt to adopt)" >> "$RESULTS"
-            elif ! ./deploy/deploy.sh "$c" "$V"; then
+              echo "${c}|ok|${REGISTRY}/${c}:${VERSION} (host runner — image built; restart fvt to adopt)" >> "$RESULTS"
+            elif ! ./deploy/deploy.sh "$c" "$VERSION"; then
               echo "${c}|fail|not applied — ${prev} still running" >> "$RESULTS"; overall=1
             else
-              echo "${c}|ok|registry:5000/${c}:${V} (deploying — rollout-check reports)" >> "$RESULTS"
+              echo "${c}|ok|${REGISTRY}/${c}:${VERSION} (deploying — rollout-check reports)" >> "$RESULTS"
             fi
             echo "::endgroup::"
           done
@@ -95,7 +98,7 @@ jobs:
         if: always()
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          V: ${{ github.event.client_payload.version }}
+          VERSION: ${{ github.event.client_payload.version }}
           REPO: ${{ github.event.client_payload.repo }}
           COMPONENTS: ${{ github.event.client_payload.components || github.event.client_payload.component }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -110,6 +113,8 @@ jobs:
         run: |
           set -euo pipefail
           RESULTS="${RUNNER_TEMP}/results.txt"
+          # owner/repo → repo: the release's short name, used for both the summary header and the embed title.
+          NAME="${REPO##*/}"
           if [ "${{ job.status }}" = "success" ]; then EMOJI="✅"; COLOR=3066993; else EMOJI="❌"; COLOR=15548997; fi
 
           # One line per component, from the results file. If it is missing (a failure before the loop,
@@ -117,7 +122,7 @@ jobs:
           # something true. A success line ends `→ \`image\``, a failure line ends `— <what happened>`,
           # so a mixed release reads as one coherent chart, not a bare "FAILED".
           body=""
-          summary="## ${EMOJI} ${REPO##*/} \`${V}\`"$'\n\n'"| component | result |"$'\n'"|---|---|"$'\n'
+          summary="## ${EMOJI} ${NAME} \`${VERSION}\`"$'\n\n'"| component | result |"$'\n'"|---|---|"$'\n'
           if [ -f "$RESULTS" ]; then
             while IFS='|' read -r c st detail; do
               [ -z "$c" ] && continue
@@ -155,7 +160,7 @@ jobs:
           desc="${body}"$'\n'"<${RUN_URL}>"
           # jq assembles the embed so the PR link and footer are added only when present — a {} merge
           # when absent leaves the base embed untouched.
-          jq -n --arg t "${EMOJI} release — ${REPO##*/} ${V}" --arg d "$desc" --argjson c "$COLOR" \
+          jq -n --arg t "${EMOJI} release — ${NAME} ${VERSION}" --arg d "$desc" --argjson c "$COLOR" \
             --arg url "${PR_URL:-}" --arg foot "$foot" \
             '{username:"platform-cicd",
               embeds:[( {title:$t, description:$d, color:$c}
