@@ -43,6 +43,9 @@ case "$COMPONENT" in
   # BASE_PATH must be identical at build time and run time: Vite bakes the prefix into asset URLs at
   # build, Express mounts the routes beneath it at run. A mismatch gives a page whose assets all 404.
   quiz)          EXTRA_ARGS=(--build-arg BASE_PATH=/cloud-developer-quiz/) ;;
+  # Same BASE_PATH rule as quiz: Vite bakes the prefix into asset URLs at build, the Go server mounts
+  # its routes beneath it at run — a mismatch 404s every asset.
+  job-searcher)  EXTRA_ARGS=(--build-arg BASE_PATH=/job-searcher/) ;;
   vmcp)          : ;;  # repo root, no quirks
   rs-mcp-server) : ;;  # repo root, the production Dockerfile
   # The traffic generator ships from rs-mcp-server's repo off a separate Dockerfile — deliberately not
