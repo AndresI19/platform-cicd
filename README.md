@@ -12,6 +12,7 @@ rolls it out as a Helm release — reported to Discord, with no inbound port.
 | `runner/Dockerfile` · `compose.yml` · `entrypoint.sh` | the self-hosted runner: ephemeral, buildx, on minikube's docker network |
 | `runner/runner.service` | systemd **user** unit that starts the runner at boot |
 | `fvt/compose.yml` · `fvt.service` | the FVT traffic runner: a host container driving the **public** API on a loop (was a cluster Pod) |
+| `e2e/` | the front-end regression oracle: Playwright specs driving the **live** site's three UIs. Run by hand, not by the pipeline — see [`e2e/README.md`](e2e/README.md) |
 | `deploy/build.sh` | build one component's image (a per-component registry of build contexts) and push it |
 | `deploy/deploy.sh` | `helm upgrade` the component's **own** release, verify the spec, hand the rollout to the cluster — applied, not awaited |
 | `deploy/rollout-check.yaml` | the Job that watches that rollout in-cluster and rolls the release back (+ Discord) if it stalls |

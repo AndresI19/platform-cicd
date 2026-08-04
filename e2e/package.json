@@ -1,0 +1,13 @@
+{
+  "name": "platform-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Playwright E2E oracle for the platform — drives the live site through every front-end feature, used as the regression gate while each repo is rewritten.",
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}
