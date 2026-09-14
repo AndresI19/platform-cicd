@@ -1,0 +1,25 @@
+# Fires the sanity sweep once a day.
+[Unit]
+Description=daily platform FVT sanity sweep
+Documentation=file:%h/git-workspace/claude-workspace/platform-cicd/fvt/sanity/README.md
+
+[Timer]
+# 06:00 local, so the night's result is already on /debug before anyone looks at it. Local rather
+# than UTC on purpose: this schedule exists to line up with a human's morning, and a UTC time would
+# drift an hour against it twice a year.
+OnCalendar=*-*-* 06:00:00
+
+# Catch up on a missed run. This machine is a desktop, not a server — it is off overnight often
+# enough that without this the board would simply have gaps on those days, and a gap reads as "the
+# platform was not checked" rather than the truth, "the checker was not running". Persistent= turns a
+# missed 06:00 into a run shortly after the next boot.
+Persistent=true
+
+# A few minutes of jitter. Nothing here contends for a shared resource, so this is mostly hygiene —
+# but it also keeps the suite off the exact minute every other daily job on this box wakes on. It
+# also gives a just-booted machine (the Persistent= catch-up case) a moment to finish coming up.
+# Waiting for the network itself is the service unit's job, via After=network-online.target.
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,37 @@
+# One run of the platform-wide sanity suite.
+#
+# Started by fvt-sanity.timer, not at boot — unlike fvt.service, whose traffic generator has to be up
+# continuously. This unit exists to be triggered, and can also be run by hand at any time:
+#   systemctl --user start fvt-sanity.service
+#
+# A *user* unit, like every other host unit here, because the docker socket and this compose project
+# belong to this user. Under `loginctl enable-linger` a user unit runs with no login session —
+# WITHOUT LINGER THE TIMER WILL NOT FIRE WHEN NOBODY IS LOGGED IN.
+[Unit]
+Description=platform FVT — daily sanity sweep of the public API
+Documentation=file:%h/git-workspace/claude-workspace/platform-cicd/fvt/sanity/README.md
+# Requires= colima for the docker daemon. It does NOT want platform.service: this suite drives the
+# PUBLIC API from outside, so "is the platform up" is the question it exists to answer, not a
+# precondition it should wait on. Ordering After= it only avoids racing a boot-time start.
+After=colima.service network-online.target platform.service
+Requires=colima.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h/git-workspace/claude-workspace/platform-cicd/fvt/sanity
+
+# --build every run, so a `git pull` is all it takes to ship a changed check — there is no registry
+# in this path to push to. --rm so a month of daily runs does not leave 30 exited containers.
+ExecStart=/home/linuxbrew/.linuxbrew/bin/docker compose -f %h/git-workspace/claude-workspace/platform-cicd/fvt/sanity/compose.yml run --rm --build fvt-sanity
+
+# The suite itself takes seconds; the first build takes about a minute. This is the backstop for a
+# run wedged on an unresponsive host, which per-request timeouts inside the suite cannot catch.
+TimeoutStartSec=900
+
+# NOT SuccessExitStatus=0 1. pytest exits non-zero when checks fail, so a red platform leaves this
+# unit `failed` — deliberately. The dashboard is the report, but `systemctl --user status` being red
+# too means a broken platform is visible from the host without opening a browser. The cost is that
+# "the suite could not run" and "the suite ran and found problems" look alike in systemd; the journal
+# and the dashboard both distinguish them, and only one of the two is worth a second signal.

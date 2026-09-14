@@ -1,0 +1,31 @@
+# The platform-wide sanity suite — a ONE-SHOT run, not a loop.
+#
+# The sibling ../compose.yml runs the rs-mcp traffic generator continuously, because its job is to
+# keep the vMCP dashboard's Recent Calls populated. This one has the opposite shape: it answers "was
+# the platform healthy at 06:00 today", runs for a couple of seconds, reports, and exits. A
+# long-lived container sleeping 23h59m between runs would be a process to supervise in exchange for
+# nothing — so the schedule lives in a systemd timer and this just describes the container.
+#
+# `build:` rather than `image:` for the same reason the Dockerfile explains: the source is the
+# directory beside this file, in this checkout. Note that means the RUNNING SUITE IS WHATEVER THIS
+# CHECKOUT HAS — a stale or feature-branched checkout silently runs stale checks. The unit rebuilds
+# every run so a `git pull` is the only thing needed to ship a change.
+services:
+  fvt-sanity:
+    build: .
+    image: platform-fvt-sanity:local
+    container_name: platform-fvt-sanity
+    # No restart policy. A one-shot that respawns on exit is an infinite loop.
+    restart: "no"
+    # Shares the traffic runner's credentials: same fvt-runner identity, same platform-auth account.
+    # A second account would be a second secret to seal and rotate, to distinguish two jobs that are
+    # both "the FVT runner".
+    env_file: [../.env]
+    environment:
+      # The suite defaults to these, but naming them here means `docker compose config` shows what a
+      # run will actually target without reading Python.
+      SITE_URL: ${SITE_URL:-https://andres.project-platform.me}
+      API_URL: ${API_URL:-https://api-andres.project-platform.me}
+      # Where the report goes. Overridable so a laptop can point at a local server, and settable to
+      # empty (FVT_REPORT=0) to run the checks without touching the history.
+      FVT_REPORT_URL: ${FVT_REPORT_URL:-https://andres.project-platform.me/api/fvt/results}
