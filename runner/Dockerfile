@@ -10,7 +10,7 @@ FROM ubuntu:24.04
 # "deprecated and cannot receive messages", and exits — jobs then queue forever. With --disableupdate
 # (the runner must never rewrite its own bin/), staying current is this ARG's job. Bump it when GitHub
 # starts rejecting the pinned one.
-ARG RUNNER_VERSION=2.335.1
+ARG RUNNER_VERSION=2.338.2
 ENV DEBIAN_FRONTEND=noninteractive
 
 # curl/jq: fetch the registration token. git: check the app repo out. gosu: drop root after fixing the
